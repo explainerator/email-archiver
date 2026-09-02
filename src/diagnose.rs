@@ -22,11 +22,12 @@ use crate::ingest;
 
 pub async fn run(config: &Config, pool: &PgPool, address: &str, folder: &str) -> Result<()> {
     let account = db::account_by_address(pool, address).await?;
-    let source = config.source(address)?;
+    let key = config.key()?;
+    let source = db::source_for(pool, &key, address).await?;
 
     println!("diagnosing {address} / {folder}");
 
-    let mut session = ingest::connect_session(source).await?;
+    let mut session = ingest::connect_session(&source).await?;
     let mailbox = session.examine(folder).await?;
     let source_exists = mailbox.exists as i64;
 

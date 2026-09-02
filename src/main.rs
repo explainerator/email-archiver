@@ -39,6 +39,18 @@ USAGE:
         Register a source mailbox feeding that user's archive. <label> becomes
         the IMAP namespace prefix, e.g. work -> work/INBOX.
 
+    email-archiver generate-key
+        Print a fresh encryption key for config.toml. Changing this key makes
+        every stored source password unreadable, so generate it once.
+
+    email-archiver set-password <login> <password>
+        Set an archive user's IMAP password (Argon2id). Until this is set the
+        account cannot be logged into at all.
+
+    email-archiver set-source <address> <host> <username> <password> [--insecure-tls]
+        Store source mailbox credentials, encrypted. --insecure-tls accepts any
+        certificate for THIS source only.
+
     email-archiver check <login> [--deep]
         Verify Postgres and S3 agree for one user. Samples 5 blobs by default;
         --deep reads and hash-checks every message body.
@@ -77,6 +89,17 @@ async fn main() -> Result<()> {
     let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
 
     let args: Vec<String> = std::env::args().skip(1).collect();
+
+    // Handled before the config is loaded. The config now REQUIRES an
+    // encryption key, so needing a working config in order to generate that key
+    // would deadlock first-time setup.
+    if args.first().map(String::as_str) == Some("generate-key") {
+        println!("{}", secrets::SecretKey::generate()?);
+        eprintln!("\nAdd to config.toml as: encryption_key = \"...\"");
+        eprintln!("Keep it. Losing it makes every stored source password unreadable.");
+        return Ok(());
+    }
+
     let config = Config::load()?;
 
     match args.first().map(String::as_str) {
@@ -99,6 +122,43 @@ async fn main() -> Result<()> {
             let pool = connect_db(&config).await?;
             let id = db::create_account(&pool, &login, &address, &label, &provider).await?;
             println!("account {address} (id {id}) -> user {login}, namespace {label}/");
+            Ok(())
+        }
+
+        Some("set-password") => {
+            let login = arg(&args, 1, "login")?;
+            let password = arg(&args, 2, "password")?;
+            let pool = connect_db(&config).await?;
+            db::set_user_password(&pool, &login, &password).await?;
+            println!("password set for {login}");
+            Ok(())
+        }
+
+        Some("set-source") => {
+            let address = arg(&args, 1, "address")?;
+            let host = arg(&args, 2, "host")?;
+            let username = arg(&args, 3, "username")?;
+            let password = arg(&args, 4, "password")?;
+            let insecure = args.iter().any(|a| a == "--insecure-tls");
+            let pool = connect_db(&config).await?;
+            db::set_source(
+                &pool,
+                &config.key()?,
+                &address,
+                &host,
+                993,
+                &username,
+                &password,
+                insecure,
+            )
+            .await?;
+            println!("source credentials stored for {address} (encrypted)");
+            if insecure {
+                eprintln!(
+                    "  WARNING: certificate verification disabled for {host} — encrypted, \
+                     but the server is NOT authenticated"
+                );
+            }
             Ok(())
         }
 

@@ -41,43 +41,28 @@ variable "database_max_connections" {
   default     = 8
 }
 
-variable "source_accounts" {
+variable "encryption_key" {
   description = <<-EOT
-    How to log in to each SOURCE mailbox being archived, keyed by address.
-    Contains passwords, so set it in secrets.tfvars.
+    Base64 32-byte key encrypting source mailbox passwords in the database.
+    Generate with: email-archiver generate-key
 
-    Postgres remains authoritative for which accounts exist (accounts.address);
-    this only says how to authenticate to one.
+    Set in secrets.tfvars. Changing it makes every stored source password
+    unreadable — they would all need re-entering.
 
-    source_accounts = {
-      "ken@twoducks.ca" = {
-        host     = "mail.example.com"
-        port     = 993
-        username = "ken@twoducks.ca"
-        password = "..."
-      }
-    }
+    Source credentials themselves are no longer rendered here; they live in the
+    accounts table, encrypted, and are set with `email-archiver set-source`.
   EOT
-  type = map(object({
-    host     = string
-    port     = optional(number, 993)
-    username = string
-    password = string
-    # Accept any server certificate for this source. Disables authentication of
-    # the server; the connection stays encrypted but nothing proves who is on
-    # the other end. Per-source, so one stale certificate does not weaken the
-    # rest.
-    allow_invalid_certs = optional(bool, false)
-  }))
-  sensitive = true
-  default   = {}
+  type        = string
+  sensitive   = true
+  default     = ""
 }
+
 
 locals {
   archiver_config = templatefile("${path.module}/files/config.toml.tftpl", {
-    database_url = var.database_url
-    s3_endpoint  = "https://s3.${lower(var.storage_region)}.io.cloud.ovh.net"
-    sources      = var.source_accounts
+    database_url   = var.database_url
+    s3_endpoint    = "https://s3.${lower(var.storage_region)}.io.cloud.ovh.net"
+    encryption_key = var.encryption_key
 
     ingest_concurrency       = var.ingest_concurrency
     database_max_connections = var.database_max_connections

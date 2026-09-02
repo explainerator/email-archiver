@@ -5,9 +5,9 @@
 //! as a server foundation before building on it, and to learn what Thunderbird
 //! actually asks for — every unhandled command is logged rather than guessed at.
 //!
-//! **Binds to loopback and accepts any password.** This is a spike, not a
-//! service. Real authentication against `users.password_hash` and TLS come
-//! before it is reachable from anywhere else.
+//! Passwords are verified against `users.password_hash` (Argon2id). **There is
+//! still no TLS**, so this must stay on loopback or behind a tunnel until that
+//! lands — a plaintext listener would put every password on the wire.
 //!
 //! Nothing here can mutate the archive: there is no APPEND, STORE, EXPUNGE or
 //! DELETE, and the only writes in the whole program are ingest and read-state.
@@ -28,6 +28,7 @@ use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::config::Config;
+use crate::db;
 use crate::fetch as fetchlib;
 use crate::naming;
 use crate::store::Store;
@@ -46,8 +47,8 @@ pub async fn run(config: &Arc<Config>, pool: &PgPool, bind: &str) -> Result<()> 
         .with_context(|| format!("binding {bind}"))?;
 
     println!("IMAP spike listening on {bind}");
-    println!("  NOTE: plaintext, loopback only, and ANY password is accepted.");
-    println!("  Point Thunderbird at this address with connection security = None.");
+    println!("  Plaintext; passwords are verified against users.password_hash.");
+    println!("  Set one with: email-archiver set-password <login>");
 
     loop {
         // A failed accept must not take down the listener: one bad connection
@@ -136,11 +137,12 @@ async fn handle(
             ok(server, tag, "CAPABILITY done");
         }
 
-        CommandBody::Login { username, .. } => {
+        CommandBody::Login { username, password } => {
             let login = String::from_utf8_lossy(username.as_ref()).to_string();
-            match lookup_user(pool, &login).await? {
+            let secret = String::from_utf8_lossy(password.declassify().as_ref()).to_string();
+            match db::authenticate(pool, &login, &secret).await? {
                 Some((user_id, bucket)) => {
-                    println!("  authenticated {login} (password NOT checked — spike)");
+                    println!("  authenticated {login}");
                     *session = Some(Session {
                         user_id,
                         bucket,
@@ -148,7 +150,13 @@ async fn handle(
                     });
                     ok(server, tag, "LOGIN done");
                 }
-                None => no(server, tag, "no such archive user"),
+                // Deliberately does not distinguish an unknown user from a
+                // wrong password: telling an attacker which logins exist is
+                // free information they should not get.
+                None => {
+                    println!("  failed login for {login:?}");
+                    no(server, tag, "authentication failed");
+                }
             }
         }
 
@@ -582,15 +590,6 @@ fn matches_pattern(pattern: &str, name: &str) -> bool {
         return name.starts_with(prefix);
     }
     pattern == name
-}
-
-async fn lookup_user(pool: &PgPool, login: &str) -> Result<Option<(i64, String)>> {
-    Ok(
-        sqlx::query_as("SELECT id, bucket FROM users WHERE login = $1")
-            .bind(login)
-            .fetch_optional(pool)
-            .await?,
-    )
 }
 
 fn ok(server: &mut Server, tag: Tag<'static>, text: &str) {

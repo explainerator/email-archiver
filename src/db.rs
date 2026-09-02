@@ -357,6 +357,109 @@ pub async fn messages_missing_headers(pool: &PgPool, user_id: i64) -> Result<Vec
 ///
 /// Written on every ingest rather than once, so a server that changes its
 /// layout is picked up rather than remembered wrongly.
+/// Decrypted source credentials for one account.
+///
+/// The password is decrypted here and lives only in memory. Nothing writes it
+/// back, and Source's Debug redacts it.
+pub async fn source_for(
+    pool: &PgPool,
+    key: &crate::secrets::SecretKey,
+    address: &str,
+) -> Result<crate::config::Source> {
+    let row: Option<(Option<String>, i32, Option<String>, Option<String>, bool)> = sqlx::query_as(
+        "SELECT imap_host, imap_port, imap_username, imap_password_enc, allow_invalid_certs
+         FROM accounts WHERE address = $1",
+    )
+    .bind(address)
+    .fetch_optional(pool)
+    .await?;
+
+    let (host, port, username, password_enc, allow_invalid_certs) =
+        row.with_context(|| format!("no account {address:?} in the database"))?;
+
+    let host = host.with_context(|| {
+        format!("account {address:?} has no source credentials. Set them with: \
+                 email-archiver set-source {address} <host> <username>")
+    })?;
+    let username = username.context("account has a host but no username")?;
+    let password_enc = password_enc.context("account has a host but no password")?;
+
+    Ok(crate::config::Source {
+        host,
+        port: port as u16,
+        username,
+        password: key.decrypt(&password_enc)?,
+        allow_invalid_certs,
+    })
+}
+
+pub async fn set_source(
+    pool: &PgPool,
+    key: &crate::secrets::SecretKey,
+    address: &str,
+    host: &str,
+    port: u16,
+    username: &str,
+    password: &str,
+    allow_invalid_certs: bool,
+) -> Result<()> {
+    let encrypted = key.encrypt(password)?;
+    let updated = sqlx::query(
+        "UPDATE accounts
+         SET imap_host = $2, imap_port = $3, imap_username = $4,
+             imap_password_enc = $5, allow_invalid_certs = $6
+         WHERE address = $1",
+    )
+    .bind(address)
+    .bind(host)
+    .bind(port as i32)
+    .bind(username)
+    .bind(&encrypted)
+    .bind(allow_invalid_certs)
+    .execute(pool)
+    .await?;
+    anyhow::ensure!(
+        updated.rows_affected() == 1,
+        "no account {address:?} — add it first with: email-archiver add-account"
+    );
+    Ok(())
+}
+
+pub async fn set_user_password(pool: &PgPool, login: &str, password: &str) -> Result<()> {
+    let hash = crate::secrets::hash_password(password)?;
+    let updated = sqlx::query("UPDATE users SET password_hash = $2 WHERE login = $1")
+        .bind(login)
+        .bind(hash)
+        .execute(pool)
+        .await?;
+    anyhow::ensure!(updated.rows_affected() == 1, "no such user {login:?}");
+    Ok(())
+}
+
+/// Verify an IMAP login. Returns the user on success.
+///
+/// A user whose password_hash is the '!' placeholder can never authenticate,
+/// which is what keeps a freshly created account from being reachable before a
+/// password is deliberately set.
+pub async fn authenticate(
+    pool: &PgPool,
+    login: &str,
+    password: &str,
+) -> Result<Option<(i64, String)>> {
+    let row: Option<(i64, String, String)> =
+        sqlx::query_as("SELECT id, bucket, password_hash FROM users WHERE login = $1")
+            .bind(login)
+            .fetch_optional(pool)
+            .await?;
+
+    Ok(match row {
+        Some((id, bucket, hash)) if crate::secrets::verify_password(password, &hash) => {
+            Some((id, bucket))
+        }
+        _ => None,
+    })
+}
+
 pub async fn set_hierarchy_delimiter(
     pool: &PgPool,
     account_id: i64,

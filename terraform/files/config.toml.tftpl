@@ -6,6 +6,11 @@
 #
 # Contains live S3 secret keys.
 
+# Encrypts source mailbox passwords, which live in the database. Deliberately
+# kept here and not there: a key stored alongside what it protects is
+# decoration. Losing it makes every stored source password unreadable.
+encryption_key = "${encryption_key}"
+
 [database]
 max_connections = ${database_max_connections}
 # The binary asserts current_database() = "archive" before doing anything, so a
@@ -37,22 +42,5 @@ region   = "${s3_region}"
 [s3.credentials."${bucket}"]
 access_key = "${creds.access_key}"
 secret_key = "${creds.secret_key}"
-
-%{ endfor ~}
-
-# ----------------------------------------------------------------------------
-# Source mailboxes, keyed by address.
-#
-# Postgres is authoritative for which accounts exist (accounts.address); this
-# only says how to authenticate to one. An account in the database with no
-# entry here is simply not ingested, and the error says so.
-# ----------------------------------------------------------------------------
-%{ for address, src in sources ~}
-[sources."${address}"]
-host     = "${src.host}"
-port     = ${src.port}
-username = "${src.username}"
-password = "${src.password}"
-allow_invalid_certs = ${src.allow_invalid_certs}
 
 %{ endfor ~}

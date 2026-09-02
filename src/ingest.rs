@@ -205,13 +205,14 @@ async fn connect(source: &Source) -> Result<Session> {
 /// Ingest every folder of one account.
 pub async fn run(config: &Config, pool: &PgPool, address: &str) -> Result<()> {
     let account = db::account_by_address(pool, address).await?;
-    let source = config.source(address)?;
+    let key = config.key()?;
+    let source = db::source_for(pool, &key, address).await?;
     // Arc so every concurrent task shares one S3 client and its connection pool.
     let store = Arc::new(Store::open(config, &account.bucket).await?);
 
     println!("ingesting {address} -> bucket {}", account.bucket);
 
-    let mut session = connect(source).await?;
+    let mut session = connect(&source).await?;
 
     // Collect names first: the session cannot be used for anything else while
     // the LIST stream is borrowed from it.
@@ -279,7 +280,7 @@ pub async fn run(config: &Config, pool: &PgPool, address: &str) -> Result<()> {
 
                     // The old session is probably dead; a fresh one is cheaper
                     // than guessing which parts of it still work.
-                    session = match connect(source).await {
+                    session = match connect(&source).await {
                         Ok(s) => s,
                         Err(reconnect_err) => {
                             eprintln!("  reconnect failed: {reconnect_err}");
