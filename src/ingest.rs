@@ -96,7 +96,7 @@ fn progress(line: &str) {
     let _ = std::io::stdout().flush();
 }
 
-type Session = async_imap::Session<tokio_rustls::client::TlsStream<TcpStream>>;
+pub type Session = async_imap::Session<tokio_rustls::client::TlsStream<TcpStream>>;
 
 /// Accepts any server certificate.
 ///
@@ -152,6 +152,10 @@ impl ServerCertVerifier for AcceptAnyCert {
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
         self.0.signature_verification_algorithms.supported_schemes()
     }
+}
+
+pub async fn connect_session(source: &Source) -> Result<Session> {
+    connect(source).await
 }
 
 async fn connect(source: &Source) -> Result<Session> {
@@ -445,8 +449,13 @@ async fn ingest_folder(
     // server never made it here, which is the failure that matters.
     let held = db::count_placements(pool, folder.id).await?;
     if held < source_exists {
+        // Deliberately does not claim the mail is missing. A shortfall is
+        // usually byte-identical duplicates collapsing into one placement,
+        // which loses nothing — the first three cases investigated were all
+        // duplicates. Claiming loss when there is none trains you to ignore
+        // the warning, so it points at the tool that can tell the difference.
         eprintln!(
-            "  WARNING {name}: source reports {source_exists} messages, archive holds {held}              — {} message(s) on the server are not archived",
+            "  NOTE {name}: source reports {source_exists}, archive holds {held} ({} fewer).              Usually duplicate copies collapsing into one message. Confirm with:              email-archiver diagnose <address> {name}",
             source_exists - held
         );
     } else {

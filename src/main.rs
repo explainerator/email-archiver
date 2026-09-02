@@ -6,6 +6,7 @@
 mod check;
 mod config;
 mod db;
+mod diagnose;
 mod envelope;
 mod fetch;
 mod ingest;
@@ -52,6 +53,10 @@ USAGE:
     email-archiver backfill-headers <login>
         Cache header blocks for messages archived before that column existed.
         Purely an optimisation; safe to interrupt and resume.
+
+    email-archiver diagnose <address> <folder>
+        Explain a folder's completeness gap: which absent source UIDs are
+        duplicates of content already archived, and which are genuinely missing.
 
     email-archiver ingest <address>
         Pull mail from one source mailbox. Resumable: re-running continues
@@ -122,6 +127,13 @@ async fn main() -> Result<()> {
             let login = arg(&args, 1, "login")?;
             let pool = connect_db(&config).await?;
             check::backfill_headers(&config, &pool, &login).await
+        }
+
+        Some("diagnose") => {
+            let address = arg(&args, 1, "address")?;
+            let folder = arg(&args, 2, "folder")?;
+            let pool = connect_db(&config).await?;
+            diagnose::run(&config, &pool, &address, &folder).await
         }
 
         Some("ingest") => {
