@@ -11,6 +11,7 @@ mod envelope;
 mod fetch;
 mod ingest;
 mod naming;
+mod secrets;
 mod server;
 mod store;
 
