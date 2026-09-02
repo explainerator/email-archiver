@@ -14,7 +14,7 @@
 
 use anyhow::{Context, Result};
 use imap_next::imap_types::core::{Tag, Vec1};
-use imap_next::imap_types::flag::{Flag, FlagNameAttribute, FlagPerm};
+use imap_next::imap_types::flag::{Flag, FlagPerm};
 use imap_next::imap_types::mailbox::{ListMailbox, Mailbox};
 use imap_next::imap_types::response::{Capability, Code, Data, Greeting, Status};
 use imap_next::server::{Options, Server};
@@ -178,7 +178,10 @@ async fn handle(
                     continue;
                 }
                 server.enqueue_data(Data::List {
-                    items: vec![FlagNameAttribute::Noinferiors],
+                    // No attributes claimed. \Noinferiors would assert these
+                    // folders cannot have children, which stops being true the
+                    // moment source hierarchy is translated into ours.
+                    items: vec![],
                     delimiter: Some(imap_next::imap_types::core::QuotedChar::try_from('/').unwrap()),
                     mailbox: Mailbox::try_from(name).unwrap(),
                 });
