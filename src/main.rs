@@ -47,6 +47,13 @@ Generate it with: cd terraform && terraform output -raw archiver_config > config
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Both `ring` and `aws-lc-rs` end up in the dependency graph (sqlx and the
+    // AWS SDK each pull one), so rustls refuses to guess which to use and
+    // panics at the first TLS handshake. Choose explicitly, once, before any
+    // connection is made. Failure here means a provider was already installed,
+    // which is harmless.
+    let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
+
     let args: Vec<String> = std::env::args().skip(1).collect();
     let config = Config::load()?;
 
