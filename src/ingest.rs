@@ -489,6 +489,9 @@ async fn store_message(
         indexed.from_addr.as_deref(),
         &indexed.envelope,
         &indexed.bodystructure,
+        // Cached so the IMAP server can answer HEADER.FIELDS without a round
+        // trip to S3 per message. See migration 0003.
+        crate::fetch::split_header_body(raw).0,
     )
     .await?;
 

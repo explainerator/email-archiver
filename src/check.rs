@@ -170,3 +170,57 @@ pub async fn rebuild_manifests(config: &Config, pool: &PgPool, login: &str) -> R
     println!("  wrote {} manifests", rows.len());
     Ok(())
 }
+
+/// Populate `messages.headers` for rows archived before it existed.
+///
+/// Reads each message once from S3 and stores its header block. Purely an
+/// optimisation — a message without a cached block still serves correctly, just
+/// with a round trip — so this can be interrupted and resumed freely.
+pub async fn backfill_headers(config: &Config, pool: &PgPool, login: &str) -> Result<()> {
+    let (user_id, bucket): (i64, String) =
+        sqlx::query_as("SELECT id, bucket FROM users WHERE login = $1")
+            .bind(login)
+            .fetch_optional(pool)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("no such user {login:?}"))?;
+
+    let missing = db::messages_missing_headers(pool, user_id).await?;
+    if missing.is_empty() {
+        println!("headers: nothing to backfill for {login}");
+        return Ok(());
+    }
+    println!("backfilling headers for {} messages ({bucket})", missing.len());
+
+    let store = Store::open(config, &bucket).await?;
+    let store = &store;
+    let concurrency = config.ingest.concurrency;
+
+    let results: Vec<Result<usize>> = stream::iter(missing.iter().map(|hash| async move {
+        let raw = store.get_message(hash).await?;
+        let header = crate::fetch::split_header_body(&raw).0.to_vec();
+        let len = header.len();
+        db::set_headers(pool, user_id, hash, &header).await?;
+        Ok(len)
+    }))
+    .buffer_unordered(concurrency)
+    .collect()
+    .await;
+
+    let mut done = 0usize;
+    let mut bytes = 0usize;
+    for r in results {
+        match r {
+            Ok(n) => {
+                done += 1;
+                bytes += n;
+            }
+            Err(e) => eprintln!("  backfill error: {e}"),
+        }
+    }
+    println!(
+        "  cached {done} header blocks, {} KB total, {} bytes average",
+        bytes / 1024,
+        if done > 0 { bytes / done } else { 0 }
+    );
+    Ok(())
+}

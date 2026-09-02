@@ -184,16 +184,24 @@ async fn handle(
             // Only touch S3 when a body was actually asked for. Thunderbird
             // builds its message list from metadata alone, and fetching bodies
             // it never requested would make listing a folder pull gigabytes.
-            let needs_body = names.iter().any(|n| {
+            // Distinguish "needs the header block" from "needs the whole
+            // message". Thunderbird's folder listing only ever asks for header
+            // fields, and answering those from the cache is what turns opening
+            // a large folder from thousands of S3 round trips into one query.
+            let needs_full_body = names.iter().any(|n| {
                 matches!(
                     n,
-                    MessageDataItemName::BodyExt { .. }
-                        | MessageDataItemName::Rfc822
-                        | MessageDataItemName::Rfc822Header
-                        | MessageDataItemName::Rfc822Text
+                    MessageDataItemName::Rfc822 | MessageDataItemName::Rfc822Text
+                ) || matches!(
+                    n,
+                    MessageDataItemName::BodyExt { section, .. }
+                        if !matches!(
+                            section,
+                            Some(Section::Header(_)) | Some(Section::HeaderFields(_, _))
+                        )
                 )
             });
-            let store = if needs_body {
+            let store = if needs_full_body {
                 Some(Store::open(config, &sess.bucket).await?)
             } else {
                 None
@@ -203,9 +211,20 @@ async fn handle(
                 let row = &rows[i];
                 let seq = std::num::NonZeroU32::new((i + 1) as u32).unwrap();
 
+                // Cached headers serve header-only requests; anything else
+                // needs the real object. A row without a cached block simply
+                // falls back, so a partial backfill is slow, never wrong.
                 let raw = match &store {
                     Some(st) => Some(st.get_message(&row.blake3).await?),
-                    None => None,
+                    None => match &row.headers {
+                        Some(h) => Some(h.clone()),
+                        None => Some(
+                            Store::open(config, &sess.bucket)
+                                .await?
+                                .get_message(&row.blake3)
+                                .await?,
+                        ),
+                    },
                 };
 
                 let mut items: Vec<MessageDataItem> = Vec::new();
@@ -376,11 +395,20 @@ pub struct Row {
     pub size: i64,
     pub internaldate: chrono::DateTime<chrono::Utc>,
     pub seen: bool,
+    /// Cached header block, when we have one. Absent means fall back to S3.
+    pub headers: Option<Vec<u8>>,
 }
 
 async fn folder_messages(pool: &PgPool, folder_id: i64) -> Result<Vec<Row>> {
-    let rows: Vec<(i64, String, i64, chrono::DateTime<chrono::Utc>, bool)> = sqlx::query_as(
-        "SELECT p.uid, m.blake3, m.size, m.internaldate, p.seen
+    let rows: Vec<(
+        i64,
+        String,
+        i64,
+        chrono::DateTime<chrono::Utc>,
+        bool,
+        Option<Vec<u8>>,
+    )> = sqlx::query_as(
+        "SELECT p.uid, m.blake3, m.size, m.internaldate, p.seen, m.headers
          FROM placements p JOIN messages m ON m.id = p.message_id
          WHERE p.folder_id = $1
          ORDER BY p.uid",
@@ -396,6 +424,7 @@ async fn folder_messages(pool: &PgPool, folder_id: i64) -> Result<Vec<Row>> {
             size: r.2,
             internaldate: r.3,
             seen: r.4,
+            headers: r.5,
         })
         .collect())
 }

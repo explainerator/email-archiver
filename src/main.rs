@@ -47,6 +47,10 @@ USAGE:
         Read-only IMAP server (Phase 4 spike). Default 127.0.0.1:1143.
         Plaintext, loopback only, ANY password accepted — not a service yet.
 
+    email-archiver backfill-headers <login>
+        Cache header blocks for messages archived before that column existed.
+        Purely an optimisation; safe to interrupt and resume.
+
     email-archiver ingest <address>
         Pull mail from one source mailbox. Resumable: re-running continues
         from where it stopped.
@@ -110,6 +114,12 @@ async fn main() -> Result<()> {
                 .unwrap_or_else(|| "127.0.0.1:1143".to_string());
             let pool = connect_db(&config).await?;
             server::run(&std::sync::Arc::new(config), &pool, &bind).await
+        }
+
+        Some("backfill-headers") => {
+            let login = arg(&args, 1, "login")?;
+            let pool = connect_db(&config).await?;
+            check::backfill_headers(&config, &pool, &login).await
         }
 
         Some("ingest") => {

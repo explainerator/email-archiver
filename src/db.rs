@@ -185,14 +185,17 @@ pub async fn upsert_message(
     from_addr: Option<&str>,
     envelope: &serde_json::Value,
     bodystructure: &serde_json::Value,
+    headers: &[u8],
 ) -> Result<i64> {
     // Deduplication is per user, matching the per-user buckets: the same
     // message arriving in two of one person's accounts is stored once.
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO messages
-             (user_id, blake3, size, internaldate, subject, from_addr, envelope, bodystructure)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-         ON CONFLICT (user_id, blake3) DO UPDATE SET user_id = messages.user_id
+             (user_id, blake3, size, internaldate, subject, from_addr, envelope,
+              bodystructure, headers)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         ON CONFLICT (user_id, blake3)
+             DO UPDATE SET headers = COALESCE(messages.headers, EXCLUDED.headers)
          RETURNING id",
     )
     .bind(user_id)
@@ -203,6 +206,7 @@ pub async fn upsert_message(
     .bind(from_addr)
     .bind(envelope)
     .bind(bodystructure)
+    .bind(headers)
     .fetch_one(pool)
     .await
     .context("inserting message")?;
@@ -337,4 +341,24 @@ pub async fn count_placements(pool: &PgPool, folder_id: i64) -> Result<i64> {
             .fetch_one(pool)
             .await?,
     )
+}
+
+/// Messages for a user with no cached header block yet.
+pub async fn messages_missing_headers(pool: &PgPool, user_id: i64) -> Result<Vec<String>> {
+    Ok(sqlx::query_scalar(
+        "SELECT blake3 FROM messages WHERE user_id = $1 AND headers IS NULL",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await?)
+}
+
+pub async fn set_headers(pool: &PgPool, user_id: i64, blake3: &str, headers: &[u8]) -> Result<()> {
+    sqlx::query("UPDATE messages SET headers = $3 WHERE user_id = $1 AND blake3 = $2")
+        .bind(user_id)
+        .bind(blake3)
+        .bind(headers)
+        .execute(pool)
+        .await?;
+    Ok(())
 }
