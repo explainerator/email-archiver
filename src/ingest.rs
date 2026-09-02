@@ -49,6 +49,41 @@ use crate::store::{Manifest, Store};
 /// trips, small enough that an interruption loses little work.
 const BATCH: usize = 200;
 
+/// Attempts per retryable operation before giving up.
+const MAX_ATTEMPTS: u32 = 5;
+
+/// First backoff delay; doubles each attempt.
+const BACKOFF_BASE: Duration = Duration::from_secs(2);
+
+/// Retry a fallible async operation with exponential backoff.
+///
+/// Every operation wrapped in this is idempotent: message keys are content-
+/// derived, the message insert is ON CONFLICT, placement checks for an existing
+/// row, and manifests overwrite. Retrying can therefore repeat work but cannot
+/// duplicate or corrupt it.
+async fn with_retry<T, F, Fut>(what: &str, mut op: F) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    let mut delay = BACKOFF_BASE;
+    for attempt in 1..=MAX_ATTEMPTS {
+        match op().await {
+            Ok(v) => return Ok(v),
+            Err(e) if attempt < MAX_ATTEMPTS => {
+                eprintln!(
+                    "  {what}: attempt {attempt}/{MAX_ATTEMPTS} failed ({e});                      retrying in {}s",
+                    delay.as_secs()
+                );
+                tokio::time::sleep(delay).await;
+                delay *= 2;
+            }
+            Err(e) => return Err(e.context(format!("{what} failed after {MAX_ATTEMPTS} attempts"))),
+        }
+    }
+    unreachable!()
+}
+
 /// Minimum gap between progress lines. Frequent enough to show the process is
 /// alive on a slow mailbox, rare enough not to drown a fast one.
 const PROGRESS_EVERY: Duration = Duration::from_secs(2);
@@ -200,15 +235,49 @@ pub async fn run(config: &Config, pool: &PgPool, address: &str) -> Result<()> {
 
     let mut total = 0usize;
     for name in &folders {
-        total += ingest_folder(
-            pool,
-            &store,
-            &mut session,
-            &account,
-            name,
-            config.ingest.concurrency,
-        )
-        .await?;
+        // Retry at folder granularity, reconnecting in between. A dropped
+        // connection mid-folder is the common failure on a multi-hour run, and
+        // resume state means a retry continues from the last completed batch
+        // rather than starting the folder again.
+        let mut attempt = 1;
+        loop {
+            match ingest_folder(
+                pool,
+                &store,
+                &mut session,
+                &account,
+                name,
+                config.ingest.concurrency,
+            )
+            .await
+            {
+                Ok(n) => {
+                    total += n;
+                    break;
+                }
+                Err(e) if attempt < MAX_ATTEMPTS => {
+                    let delay = BACKOFF_BASE * 2u32.pow(attempt - 1);
+                    eprintln!(
+                        "  {name}: failed ({e}); reconnecting and retrying in {}s                          (attempt {attempt}/{MAX_ATTEMPTS})",
+                        delay.as_secs()
+                    );
+                    tokio::time::sleep(delay).await;
+
+                    // The old session is probably dead; a fresh one is cheaper
+                    // than guessing which parts of it still work.
+                    session = match connect(source).await {
+                        Ok(s) => s,
+                        Err(reconnect_err) => {
+                            eprintln!("  reconnect failed: {reconnect_err}");
+                            attempt += 1;
+                            continue;
+                        }
+                    };
+                    attempt += 1;
+                }
+                Err(e) => return Err(e.context(format!("folder {name}"))),
+            }
+        }
     }
 
     session.logout().await.ok();
@@ -257,11 +326,14 @@ async fn ingest_folder(
         search
     };
 
-    if uids.is_empty() {
-        return Ok(0);
-    }
+    // No early return when there is nothing to fetch: chunks() over an empty
+    // slice yields no batches anyway, and returning here would skip the
+    // completeness check below — which is precisely the check you want on a
+    // re-run, when every folder finds nothing new.
     let total = uids.len();
-    progress(&format!("  {name}: {total} to fetch"));
+    if total > 0 {
+        progress(&format!("  {name}: {total} to fetch"));
+    }
     let mut processed = 0usize;
 
     for chunk in uids.chunks(BATCH) {
@@ -281,7 +353,7 @@ async fn ingest_folder(
             let mut stream = session
                 .uid_fetch(&set, "(UID FLAGS BODY.PEEK[])")
                 .await
-                .with_context(|| format!("fetching {name} uids {set}"))?;
+                .with_context(|| format!("fetching {name} uids"))?;
 
             let mut out = Vec::new();
             while let Some(item) = stream.next().await {
@@ -308,9 +380,13 @@ async fn ingest_folder(
                 let folder = folder.clone();
                 let name = name.to_string();
                 async move {
-                    store_message(
-                        &pool, &store, &account, &folder, &name, source_uid, &raw, seen,
-                    )
+                    // Retried individually: one S3 hiccup should cost a few
+                    // seconds, not the whole folder.
+                    with_retry(&format!("{name}/{source_uid}"), || {
+                        store_message(
+                            &pool, &store, &account, &folder, &name, source_uid, &raw, seen,
+                        )
+                    })
                     .await
                 }
             },
