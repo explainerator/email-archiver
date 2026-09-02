@@ -30,8 +30,14 @@ use std::io::Write;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::TcpStream;
-use tokio_rustls::rustls::pki_types::ServerName;
-use tokio_rustls::rustls::{ClientConfig, RootCertStore};
+use tokio_rustls::rustls::client::danger::{
+    HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
+};
+use tokio_rustls::rustls::crypto::CryptoProvider;
+use tokio_rustls::rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use tokio_rustls::rustls::{
+    ClientConfig, DigitallySignedStruct, Error as TlsError, RootCertStore, SignatureScheme,
+};
 use tokio_rustls::TlsConnector;
 
 use crate::config::{Config, Source};
@@ -57,13 +63,83 @@ fn progress(line: &str) {
 
 type Session = async_imap::Session<tokio_rustls::client::TlsStream<TcpStream>>;
 
+/// Accepts any server certificate.
+///
+/// Signature verification is still delegated to the crypto provider, so the
+/// handshake itself remains sound — what is skipped is deciding whether the
+/// certificate belongs to the host we meant to reach. Used only where a source
+/// sets `allow_invalid_certs`.
+#[derive(Debug)]
+struct AcceptAnyCert(Arc<CryptoProvider>);
+
+impl ServerCertVerifier for AcceptAnyCert {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, TlsError> {
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, TlsError> {
+        tokio_rustls::rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.0.signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, TlsError> {
+        tokio_rustls::rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.0.signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.0.signature_verification_algorithms.supported_schemes()
+    }
+}
+
 async fn connect(source: &Source) -> Result<Session> {
-    let roots = RootCertStore {
-        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+    let tls_config = if source.allow_invalid_certs {
+        // Loud, and on stderr: a run that silently stopped authenticating the
+        // server should not look like a normal one in a log read months later.
+        eprintln!(
+            "  WARNING: certificate verification DISABLED for {} — the connection is              encrypted but the server is not authenticated",
+            source.host
+        );
+        let provider = CryptoProvider::get_default()
+            .context("no rustls crypto provider installed")?
+            .clone();
+        ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(AcceptAnyCert(provider)))
+            .with_no_client_auth()
+    } else {
+        let roots = RootCertStore {
+            roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+        };
+        ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth()
     };
-    let tls_config = ClientConfig::builder()
-        .with_root_certificates(roots)
-        .with_no_client_auth();
     let connector = TlsConnector::from(Arc::new(tls_config));
 
     let tcp = TcpStream::connect((source.host.as_str(), source.port))

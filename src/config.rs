@@ -52,6 +52,20 @@ pub struct Source {
     /// Password or app password. Gmail (XOAUTH2) is not supported yet — see
     /// ARCHIVE-PLAN.md 3.3; the generic-IMAP accounts come first deliberately.
     pub password: String,
+
+    /// Accept any server certificate for this source, including expired,
+    /// self-signed, or wrong-hostname ones.
+    ///
+    /// **This disables authentication of the server entirely.** The connection
+    /// is still encrypted, but nothing proves you are talking to the intended
+    /// host — an attacker positioned on the path could present their own
+    /// certificate, take the password, and hand back whatever they liked as
+    /// your mail.
+    ///
+    /// Per-source rather than global, so allowing it for one server with a
+    /// stale certificate does not quietly weaken every other connection.
+    #[serde(default)]
+    pub allow_invalid_certs: bool,
 }
 
 fn default_imaps_port() -> u16 {

@@ -63,6 +63,11 @@ variable "source_accounts" {
     port     = optional(number, 993)
     username = string
     password = string
+    # Accept any server certificate for this source. Disables authentication of
+    # the server; the connection stays encrypted but nothing proves who is on
+    # the other end. Per-source, so one stale certificate does not weaken the
+    # rest.
+    allow_invalid_certs = optional(bool, false)
   }))
   sensitive = true
   default   = {}
