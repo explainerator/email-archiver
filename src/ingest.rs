@@ -26,7 +26,9 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use futures::stream::{self, StreamExt};
 use sqlx::PgPool;
+use std::io::Write;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::net::TcpStream;
 use tokio_rustls::rustls::pki_types::ServerName;
 use tokio_rustls::rustls::{ClientConfig, RootCertStore};
@@ -40,6 +42,18 @@ use crate::store::{Manifest, Store};
 /// How many messages to request per FETCH. Large enough to amortise round
 /// trips, small enough that an interruption loses little work.
 const BATCH: usize = 200;
+
+/// Minimum gap between progress lines. Frequent enough to show the process is
+/// alive on a slow mailbox, rare enough not to drown a fast one.
+const PROGRESS_EVERY: Duration = Duration::from_secs(2);
+
+/// Print immediately rather than when the buffer happens to fill. Rust block-
+/// buffers stdout when it is not a terminal, so without this a piped or
+/// redirected run shows nothing for minutes — exactly when progress matters.
+fn progress(line: &str) {
+    println!("{line}");
+    let _ = std::io::stdout().flush();
+}
 
 type Session = async_imap::Session<tokio_rustls::client::TlsStream<TcpStream>>;
 
@@ -148,6 +162,9 @@ async fn ingest_folder(
     let range = format!("{}:*", folder.last_source_uid + 1);
     let mut new_messages = 0usize;
 
+    // Searching a large mailbox is itself slow enough to look like a hang.
+    progress(&format!("  {name}: searching for new messages"));
+
     // UID FETCH with BODY.PEEK[] — PEEK so the source's \Seen flags are not
     // modified by the act of archiving.
     let uids: Vec<u32> = {
@@ -165,7 +182,7 @@ async fn ingest_folder(
         return Ok(0);
     }
     let total = uids.len();
-    println!("  {name}: {total} to fetch");
+    progress(&format!("  {name}: {total} to fetch"));
     let mut processed = 0usize;
 
     for chunk in uids.chunks(BATCH) {
@@ -174,6 +191,12 @@ async fn ingest_folder(
             .map(|u| u.to_string())
             .collect::<Vec<_>>()
             .join(",");
+
+        progress(&format!(
+            "    {name}: fetching {} messages ({}/{total})",
+            chunk.len(),
+            processed + chunk.len()
+        ));
 
         let fetched: Vec<(u32, Vec<u8>, bool)> = {
             let mut stream = session
@@ -197,7 +220,8 @@ async fn ingest_folder(
         // The IMAP fetch above is necessarily serial — one session, one selected
         // mailbox — but everything after it is network round trips to S3 and
         // Postgres, which overlap happily.
-        let outcomes: Vec<Result<bool>> = stream::iter(fetched.into_iter().map(
+        let fetched_len = fetched.len();
+        let mut outcomes = stream::iter(fetched.into_iter().map(
             |(source_uid, raw, seen)| {
                 let pool = pool.clone();
                 let store = Arc::clone(store);
@@ -212,13 +236,23 @@ async fn ingest_folder(
                 }
             },
         ))
-        .buffer_unordered(concurrency)
-        .collect()
-        .await;
+        .buffer_unordered(concurrency);
 
-        for outcome in outcomes {
+        // Consumed as results arrive rather than collected, so a slow batch
+        // reports progress while it is still running.
+        let mut done = 0usize;
+        let mut last_tick = Instant::now();
+        while let Some(outcome) = outcomes.next().await {
             if outcome? {
                 new_messages += 1;
+            }
+            done += 1;
+            if last_tick.elapsed() >= PROGRESS_EVERY && done < fetched_len {
+                progress(&format!(
+                    "    {name}: stored {}/{} of this batch, {new_messages} new so far",
+                    done, fetched_len
+                ));
+                last_tick = Instant::now();
             }
         }
 
@@ -233,7 +267,9 @@ async fn ingest_folder(
         // the only sign of life during a long run. Counts are cumulative for
         // the folder, so the last line doubles as the folder's total.
         processed += chunk.len();
-        println!("    {name}: {processed}/{total} fetched, {new_messages} new");
+        progress(&format!(
+            "    {name}: {processed}/{total} done, {new_messages} new"
+        ));
     }
 
     Ok(new_messages)
