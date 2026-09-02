@@ -14,6 +14,8 @@
 
 use anyhow::{Context, Result};
 use imap_next::imap_types::core::{Tag, Vec1};
+use imap_next::imap_types::flag::{Flag, FlagNameAttribute, FlagPerm};
+use imap_next::imap_types::mailbox::{ListMailbox, Mailbox};
 use imap_next::imap_types::response::{Capability, Code, Data, Greeting, Status};
 use imap_next::server::{Options, Server};
 use imap_next::stream::Stream;
@@ -151,6 +153,101 @@ async fn handle(
 
         CommandBody::Noop => ok(server, tag, "NOOP done"),
 
+        CommandBody::List {
+            mailbox_wildcard, ..
+        }
+        | CommandBody::Lsub {
+            mailbox_wildcard, ..
+        } => {
+            let Some(sess) = session.as_ref() else {
+                no(server, tag, "not authenticated");
+                return Ok(false);
+            };
+            let pattern = wildcard_text(&mailbox_wildcard);
+
+            // INBOX always exists and is always empty. Nothing is delivered to
+            // this server — every archived message lives under an account
+            // namespace — but Thunderbird requires an INBOX to exist, and an
+            // empty one is the truthful answer rather than aliasing somebody's
+            // mail into it.
+            let mut names = vec!["INBOX".to_string()];
+            names.extend(folders_for(pool, sess.user_id).await?.into_iter().map(|(_, n)| n));
+
+            for name in names {
+                if !matches_pattern(&pattern, &name) {
+                    continue;
+                }
+                server.enqueue_data(Data::List {
+                    items: vec![FlagNameAttribute::Noinferiors],
+                    delimiter: Some(imap_next::imap_types::core::QuotedChar::try_from('/').unwrap()),
+                    mailbox: Mailbox::try_from(name).unwrap(),
+                });
+            }
+            ok(server, tag, "LIST done");
+        }
+
+        CommandBody::Select { mailbox } | CommandBody::Examine { mailbox } => {
+            let Some(sess) = session.as_mut() else {
+                no(server, tag, "not authenticated");
+                return Ok(false);
+            };
+            let wanted = mailbox_text(&mailbox);
+
+            let (folder_id, exists, uidvalidity, uidnext) = if wanted == "INBOX" {
+                (None, 0i64, 1i64, 1i64)
+            } else {
+                match folder_meta(pool, sess.user_id, &wanted).await? {
+                    Some(m) => (Some(m.0), m.1, m.2, m.3),
+                    None => {
+                        no(server, tag, "no such mailbox");
+                        return Ok(false);
+                    }
+                }
+            };
+
+            server.enqueue_data(Data::Exists(exists as u32));
+            server.enqueue_data(Data::Recent(0));
+            server.enqueue_data(Data::Flags(vec![Flag::Seen]));
+            server.enqueue_status(
+                Status::ok(
+                    None,
+                    Some(Code::UidValidity(
+                        std::num::NonZeroU32::new(uidvalidity.max(1) as u32).unwrap(),
+                    )),
+                    "uid validity",
+                )
+                .unwrap(),
+            );
+            server.enqueue_status(
+                Status::ok(
+                    None,
+                    Some(Code::UidNext(
+                        std::num::NonZeroU32::new(uidnext.max(1) as u32).unwrap(),
+                    )),
+                    "next uid",
+                )
+                .unwrap(),
+            );
+            // \Seen is the only flag a client may set, so it is the only one
+            // listed as permanent. Everything else about a message is fixed.
+            server.enqueue_status(
+                Status::ok(
+                    None,
+                    Some(Code::PermanentFlags(vec![FlagPerm::Flag(Flag::Seen)])),
+                    "limited",
+                )
+                .unwrap(),
+            );
+
+            sess.selected = folder_id.map(|id| (id, wanted.clone()));
+            // READ-ONLY even for SELECT: this archive is never writable, and
+            // saying so up front is better than refusing writes later.
+            server.enqueue_status(
+                Status::ok(Some(tag), Some(Code::ReadOnly), "selected (read-only)").unwrap(),
+            );
+            return Ok(false);
+        }
+
         other => {
             println!("  !! not implemented: {other:?}");
             no(server, tag, "not implemented in this spike");
@@ -159,6 +256,77 @@ async fn handle(
 
     let _ = (config, session);
     Ok(false)
+}
+
+/// Folders visible to a user, as `<account label>/<source folder name>`.
+///
+/// Namespaced by account because one archive user may hold several source
+/// mailboxes, each with its own INBOX — they cannot all be called INBOX.
+async fn folders_for(pool: &PgPool, user_id: i64) -> Result<Vec<(i64, String)>> {
+    let rows: Vec<(i64, String, String)> = sqlx::query_as(
+        "SELECT f.id, a.label, f.name
+         FROM folders f JOIN accounts a ON a.id = f.account_id
+         WHERE a.user_id = $1
+         ORDER BY a.label, f.name",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, label, name)| (id, format!("{label}/{name}")))
+        .collect())
+}
+
+/// (folder id, message count, our uidvalidity, our uidnext)
+async fn folder_meta(
+    pool: &PgPool,
+    user_id: i64,
+    display_name: &str,
+) -> Result<Option<(i64, i64, i64, i64)>> {
+    let row: Option<(i64, i64, i64)> = sqlx::query_as(
+        "SELECT f.id, f.uidvalidity, f.uidnext
+         FROM folders f JOIN accounts a ON a.id = f.account_id
+         WHERE a.user_id = $1 AND (a.label || '/' || f.name) = $2",
+    )
+    .bind(user_id)
+    .bind(display_name)
+    .fetch_optional(pool)
+    .await?;
+
+    let Some((id, uidvalidity, uidnext)) = row else {
+        return Ok(None);
+    };
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM placements WHERE folder_id = $1")
+        .bind(id)
+        .fetch_one(pool)
+        .await?;
+    Ok(Some((id, count, uidvalidity, uidnext)))
+}
+
+fn mailbox_text(m: &Mailbox<'_>) -> String {
+    match m {
+        Mailbox::Inbox => "INBOX".to_string(),
+        Mailbox::Other(o) => String::from_utf8_lossy(o.as_ref()).to_string(),
+    }
+}
+
+fn wildcard_text(m: &ListMailbox<'_>) -> String {
+    match m {
+        ListMailbox::Token(t) => String::from_utf8_lossy(t.as_ref()).to_string(),
+        ListMailbox::String(s) => String::from_utf8_lossy(s.as_ref()).to_string(),
+    }
+}
+
+/// Minimal IMAP wildcard match: `*` spans hierarchy, `%` does not.
+fn matches_pattern(pattern: &str, name: &str) -> bool {
+    if pattern == "*" || pattern.is_empty() {
+        return true;
+    }
+    if let Some(prefix) = pattern.strip_suffix('*') {
+        return name.starts_with(prefix);
+    }
+    pattern == name
 }
 
 async fn lookup_user(pool: &PgPool, login: &str) -> Result<Option<(i64, String)>> {
