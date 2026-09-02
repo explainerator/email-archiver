@@ -64,11 +64,14 @@ body {
 .folders { border-right: 1px solid var(--line); padding: .5rem; }
 .list { border-right: 1px solid var(--line); }
 
+/* A div, not a button: it contains the twisty button, and nested buttons are
+   invalid HTML that browsers recover from unpredictably. Indentation is set
+   inline per node, since the depth is only known at render time. */
 .folder {
-  display: flex; width: 100%; gap: .5rem; align-items: center;
-  padding: .35rem .5rem; border: 0; border-radius: 4px;
+  display: flex; width: 100%; gap: .35rem; align-items: center;
+  padding: .3rem .5rem; border-radius: 4px;
   background: none; color: inherit; font: inherit;
-  text-align: left; cursor: pointer;
+  text-align: left; cursor: pointer; user-select: none;
 }
 .folder:hover { background: color-mix(in srgb, var(--fg) 7%, transparent); }
 .folder.chosen { background: color-mix(in srgb, var(--accent) 18%, transparent); }
@@ -164,3 +167,17 @@ body {
 /* The folder a hit came from, trailing the subject rather than taking a column
    of its own -- it is context, not a field worth aligning. */
 .list .infolder { color: var(--muted); font-size: .8rem; }
+
+/* Folder tree */
+.twisty {
+  flex: 0 0 1rem; width: 1rem; padding: 0; border: 0;
+  background: none; color: var(--muted); font: inherit; font-size: .7rem;
+  line-height: 1; cursor: pointer; text-align: center;
+}
+.twisty:hover { color: var(--fg); }
+/* Leaves keep the same indent as their siblings with children, so labels at one
+   depth line up rather than stepping in and out. */
+.twisty.spacer { cursor: default; }
+/* A node with no folder of its own -- an intermediate path that holds only
+   children -- is dimmed, because clicking it opens nothing. */
+.folder .name.container { color: var(--muted); }

@@ -13,6 +13,7 @@ use archive_api_types::{
     Folder, Identity, Mailbox, MessageDetail, MessageSummary, SearchHit, MIN_SEARCH_LEN,
 };
 use dioxus::prelude::*;
+use std::collections::HashSet;
 
 const CSS: Asset = asset!("/assets/main.css");
 
@@ -124,6 +125,11 @@ fn Shell(identity: Identity, auth: Signal<Auth>) -> Element {
     let mut query = use_signal(String::new);
     let mut typed = use_signal(String::new);
 
+    // Which nodes are open, by full path. Empty means everything collapsed,
+    // which is the default: 46 folders four levels deep is a wall of text, and
+    // two account rows is a place to start from.
+    let mut expanded = use_signal(HashSet::<String>::new);
+
     let sign_out = move |_| async move {
         let _ = api::logout().await;
         auth.set(Auth::SignedOut);
@@ -173,11 +179,13 @@ fn Shell(identity: Identity, auth: Signal<Auth>) -> Element {
                         None => rsx! { p { class: "muted", "Loading…" } },
                         Some(Err(e)) => rsx! { p { class: "error", "{e.message()}" } },
                         Some(Ok(list)) => rsx! {
-                            for folder in list.clone() {
-                                FolderRow {
-                                    key: "{folder.id}",
-                                    folder: folder.clone(),
-                                    selected: selected().map(|f| f.id) == Some(folder.id),
+                            for node in build_tree(list.clone()) {
+                                FolderNode {
+                                    key: "{node.path}",
+                                    node,
+                                    depth: 0,
+                                    expanded,
+                                    selected: selected().map(|f| f.id),
                                     onselect: move |f| { selected.set(Some(f)); open.set(None); },
                                 }
                             }
@@ -218,16 +226,204 @@ fn Shell(identity: Identity, auth: Signal<Auth>) -> Element {
     }
 }
 
+/// One node of the folder tree.
+///
+/// A node is not the same thing as a folder. `personal/Archives` holds 15 years
+/// of mail in children but contains nothing itself, and would not appear in a
+/// flat list at all if the server had not returned it -- while `personal/INBOX`
+/// is both a real folder of 53,573 messages AND a parent. So `folder` is
+/// optional and `children` is independent of it.
+#[derive(Clone, PartialEq)]
+struct Node {
+    /// Just this segment, which is what gets displayed.
+    label: String,
+    /// The full path, used as the identity for expansion state.
+    path: String,
+    folder: Option<Folder>,
+    children: Vec<Node>,
+}
+
+impl Node {
+    /// Unread in this node and everything under it.
+    ///
+    /// A collapsed parent has to answer for its children: a `Junk` folder with
+    /// 3,971 unread hidden two levels down is exactly the thing a collapsed
+    /// tree must not conceal.
+    fn unread_total(&self) -> i64 {
+        self.folder.as_ref().map_or(0, |f| f.unread)
+            + self.children.iter().map(Node::unread_total).sum::<i64>()
+    }
+
+    fn has_children(&self) -> bool {
+        !self.children.is_empty()
+    }
+}
+
+/// Turn the server's flat list of `account/path/to/folder` into a tree.
+///
+/// Intermediate segments that the server never sent as folders still become
+/// nodes, so a child is never orphaned by a missing parent.
+fn build_tree(folders: Vec<Folder>) -> Vec<Node> {
+    let mut roots: Vec<Node> = Vec::new();
+
+    // Sorted first so insertion order does not decide sibling order, and so
+    // parents are created before the children that need them.
+    let mut folders = folders;
+    folders.sort_by(|a, b| a.path.to_lowercase().cmp(&b.path.to_lowercase()));
+
+    for folder in folders {
+        let segments: Vec<&str> = folder
+            .path
+            .split(SEPARATOR)
+            .filter(|s| !s.is_empty())
+            .collect();
+        if segments.is_empty() {
+            continue;
+        }
+
+        let mut level = &mut roots;
+        let mut prefix = String::new();
+
+        for (i, segment) in segments.iter().enumerate() {
+            if !prefix.is_empty() {
+                prefix.push(SEPARATOR);
+            }
+            prefix.push_str(segment);
+
+            let existing = level.iter().position(|n| n.label == *segment);
+            let index = match existing {
+                Some(index) => index,
+                None => {
+                    level.push(Node {
+                        label: (*segment).to_string(),
+                        path: prefix.clone(),
+                        folder: None,
+                        children: Vec::new(),
+                    });
+                    level.len() - 1
+                }
+            };
+
+            if i == segments.len() - 1 {
+                level[index].folder = Some(folder.clone());
+            }
+            level = &mut level[index].children;
+        }
+    }
+
+    sort_tree(&mut roots);
+    roots
+}
+
+const SEPARATOR: char = '/';
+
+/// INBOX first, then everything else alphabetically.
+///
+/// Matching what every mail client does: INBOX is the one folder people look
+/// for by position rather than by reading.
+fn sort_tree(nodes: &mut Vec<Node>) {
+    nodes.sort_by(|a, b| {
+        let rank = |n: &Node| {
+            if n.label.eq_ignore_ascii_case("INBOX") {
+                0
+            } else {
+                1
+            }
+        };
+        rank(a)
+            .cmp(&rank(b))
+            .then_with(|| a.label.to_lowercase().cmp(&b.label.to_lowercase()))
+    });
+    for node in nodes.iter_mut() {
+        sort_tree(&mut node.children);
+    }
+}
+
 #[component]
-fn FolderRow(folder: Folder, selected: bool, onselect: EventHandler<Folder>) -> Element {
-    let chosen = folder.clone();
+fn FolderNode(
+    node: Node,
+    depth: usize,
+    expanded: Signal<HashSet<String>>,
+    selected: Option<i64>,
+    onselect: EventHandler<Folder>,
+) -> Element {
+    let is_open = expanded.read().contains(&node.path);
+    let is_selected = node.folder.as_ref().map(|f| f.id) == selected && selected.is_some();
+
+    // Collapsed nodes answer for their subtree; expanded ones show only their
+    // own, since the children are on screen speaking for themselves.
+    let badge = if is_open {
+        node.folder.as_ref().map_or(0, |f| f.unread)
+    } else {
+        node.unread_total()
+    };
+
+    let toggle_path = node.path.clone();
+    let toggle = move |event: Event<MouseData>| {
+        // Stops the row's own click handler from also firing and selecting the
+        // folder: expanding a parent and opening it are different intents.
+        event.stop_propagation();
+        let mut set = expanded.write();
+        if !set.remove(&toggle_path) {
+            set.insert(toggle_path.clone());
+        }
+    };
+
+    let chosen = node.folder.clone();
+    let fallback_path = node.path.clone();
+    let activate = move |_| match chosen.clone() {
+        Some(folder) => onselect.call(folder),
+        // A node with no folder of its own has nothing to open, so clicking it
+        // does the only useful thing available.
+        None => {
+            let mut set = expanded.write();
+            if !set.remove(&fallback_path) {
+                set.insert(fallback_path.clone());
+            }
+        }
+    };
+
     rsx! {
-        button {
-            class: if selected { "folder chosen" } else { "folder" },
-            onclick: move |_| onselect.call(chosen.clone()),
-            span { class: "name", "{folder.path}" }
-            if folder.unread > 0 {
-                span { class: "badge", "{folder.unread}" }
+        div {
+            class: if is_selected { "folder chosen" } else { "folder" },
+            style: "padding-left: {0.4 + depth as f32 * 0.85}rem",
+            onclick: activate,
+
+            if node.has_children() {
+                button {
+                    class: "twisty",
+                    // The row is a div rather than a button so this can be a
+                    // button inside it; nested buttons are invalid HTML and
+                    // browsers recover from them unpredictably.
+                    "aria-expanded": if is_open { "true" } else { "false" },
+                    "aria-label": if is_open { "Collapse" } else { "Expand" },
+                    onclick: toggle,
+                    if is_open { "\u{25BE}" } else { "\u{25B8}" }
+                }
+            } else {
+                span { class: "twisty spacer" }
+            }
+
+            span {
+                class: if node.folder.is_some() { "name" } else { "name container" },
+                title: "{node.path}",
+                "{node.label}"
+            }
+            if badge > 0 {
+                span { class: "badge", "{badge}" }
+            }
+        }
+
+        if is_open {
+            for child in node.children.iter() {
+                FolderNode {
+                    key: "{child.path}",
+                    node: child.clone(),
+                    depth: depth + 1,
+                    expanded,
+                    selected,
+                    onselect,
+                }
             }
         }
     }
@@ -645,5 +841,107 @@ fn SearchResults(query: String, opened: Option<String>, onopen: EventHandler<Str
                 if loading() { "Loading..." } else { "Load more" }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn folder(id: i64, path: &str, unread: i64) -> Folder {
+        Folder {
+            id,
+            account: path.split('/').next().unwrap_or("").to_string(),
+            path: path.to_string(),
+            total: 0,
+            unread,
+        }
+    }
+
+    fn find<'a>(nodes: &'a [Node], path: &str) -> Option<&'a Node> {
+        for node in nodes {
+            if node.path == path {
+                return Some(node);
+            }
+            if let Some(found) = find(&node.children, path) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn nests_by_path_segment() {
+        let tree = build_tree(vec![
+            folder(1, "personal/Archives/2019", 0),
+            folder(2, "personal/INBOX", 0),
+        ]);
+        assert_eq!(tree.len(), 1, "expected one account root");
+        assert_eq!(tree[0].label, "personal");
+        assert!(find(&tree, "personal/Archives/2019").is_some());
+    }
+
+    #[test]
+    fn invents_missing_parents() {
+        // The real archive has personal/Archives/qra/2014/Sent where some
+        // intermediate levels hold no mail of their own. A child must never be
+        // orphaned because the server did not list its parent.
+        let tree = build_tree(vec![folder(1, "personal/Archives/qra/2014/Sent", 3)]);
+        let qra = find(&tree, "personal/Archives/qra").expect("parent invented");
+        assert!(
+            qra.folder.is_none(),
+            "invented parent must not claim to be a folder"
+        );
+        assert!(find(&tree, "personal/Archives/qra/2014/Sent").is_some());
+    }
+
+    #[test]
+    fn a_node_can_be_both_folder_and_parent() {
+        // personal/INBOX holds 53,573 messages AND has children.
+        let tree = build_tree(vec![
+            folder(1, "personal/INBOX", 7),
+            folder(2, "personal/INBOX/Sent", 0),
+        ]);
+        let inbox = find(&tree, "personal/INBOX").unwrap();
+        assert!(inbox.folder.is_some(), "lost its own folder");
+        assert!(inbox.has_children(), "lost its children");
+    }
+
+    #[test]
+    fn collapsed_parents_answer_for_their_children() {
+        // The property that makes collapsing safe: 3,971 unread hidden two
+        // levels down must still be visible on the collapsed ancestor.
+        let tree = build_tree(vec![
+            folder(1, "personal/Junk", 3971),
+            folder(2, "personal/Archives/2019", 1765),
+        ]);
+        assert_eq!(tree[0].unread_total(), 3971 + 1765);
+    }
+
+    #[test]
+    fn inbox_sorts_first_then_alphabetical() {
+        let tree = build_tree(vec![
+            folder(1, "a/Zebra", 0),
+            folder(2, "a/apple", 0),
+            folder(3, "a/INBOX", 0),
+        ]);
+        let labels: Vec<&str> = tree[0].children.iter().map(|n| n.label.as_str()).collect();
+        assert_eq!(labels, vec!["INBOX", "apple", "Zebra"]);
+    }
+
+    #[test]
+    fn every_node_has_a_unique_path_for_expansion_state() {
+        // Expansion is keyed by path, so a duplicate would make two nodes open
+        // and close together.
+        let tree = build_tree(vec![folder(1, "a/x/Sent", 0), folder(2, "b/x/Sent", 0)]);
+        let mut seen = std::collections::HashSet::new();
+        fn walk(nodes: &[Node], seen: &mut std::collections::HashSet<String>) {
+            for n in nodes {
+                assert!(seen.insert(n.path.clone()), "duplicate path {}", n.path);
+                walk(&n.children, seen);
+            }
+        }
+        walk(&tree, &mut seen);
+        assert_eq!(seen.len(), 6);
     }
 }
