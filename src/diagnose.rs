@@ -103,9 +103,7 @@ pub async fn run(config: &Config, pool: &PgPool, address: &str, folder: &str) ->
             match placed_here {
                 Some(existing_uid) => {
                     duplicates += 1;
-                    println!(
-                        "  uid {uid}: duplicate of content already at our uid {existing_uid}"
-                    );
+                    println!("  uid {uid}: duplicate of content already at our uid {existing_uid}");
                 }
                 None => {
                     missing.push(uid);
@@ -117,7 +115,10 @@ pub async fn run(config: &Config, pool: &PgPool, address: &str, folder: &str) ->
 
     session.logout().await.ok();
 
-    println!("\n  {duplicates} deduplicated, {} genuinely missing", missing.len());
+    println!(
+        "\n  {duplicates} deduplicated, {} genuinely missing",
+        missing.len()
+    );
     if !missing.is_empty() {
         println!("  missing source UIDs: {missing:?}");
     }

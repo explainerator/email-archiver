@@ -18,13 +18,13 @@
 //! DELETE, and the only writes in the whole program are ingest and read-state.
 
 use anyhow::{Context, Result};
-use imap_next::imap_types::core::{Tag, Vec1};
-use imap_next::imap_types::flag::{Flag, FlagPerm};
-use imap_next::imap_types::mailbox::{ListMailbox, Mailbox};
 use imap_next::imap_types::core::{IString, Literal, NString};
+use imap_next::imap_types::core::{Tag, Vec1};
 use imap_next::imap_types::datetime::DateTime;
 use imap_next::imap_types::fetch::{MessageDataItem, MessageDataItemName, Section};
 use imap_next::imap_types::flag::FlagFetch;
+use imap_next::imap_types::flag::{Flag, FlagPerm};
+use imap_next::imap_types::mailbox::{ListMailbox, Mailbox};
 use imap_next::imap_types::response::{Capability, Code, Data, Greeting, Status};
 use imap_next::server::{Options, Server};
 use imap_next::stream::Stream;
@@ -33,9 +33,9 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 
 use crate::config::Config;
-use crate::listen;
 use crate::db;
 use crate::fetch as fetchlib;
+use crate::listen;
 use crate::naming;
 use crate::store::Store;
 
@@ -344,7 +344,12 @@ async fn handle(
             // empty one is the truthful answer rather than aliasing somebody's
             // mail into it.
             let mut names = vec!["INBOX".to_string()];
-            names.extend(folders_for(pool, sess.user_id).await?.into_iter().map(|(_, n)| n));
+            names.extend(
+                folders_for(pool, sess.user_id)
+                    .await?
+                    .into_iter()
+                    .map(|(_, n)| n),
+            );
 
             for name in names {
                 if !matches_pattern(&pattern, &name) {
@@ -355,7 +360,9 @@ async fn handle(
                     // folders cannot have children, which stops being true the
                     // moment source hierarchy is translated into ours.
                     items: vec![],
-                    delimiter: Some(imap_next::imap_types::core::QuotedChar::try_from('/').unwrap()),
+                    delimiter: Some(
+                        imap_next::imap_types::core::QuotedChar::try_from('/').unwrap(),
+                    ),
                     mailbox: Mailbox::try_from(name).unwrap(),
                 });
             }
@@ -593,13 +600,14 @@ async fn folder_meta(
         None => return Ok(None),
     };
 
-    let delim: Option<String> =
-        sqlx::query_scalar("SELECT hierarchy_delimiter FROM accounts WHERE user_id = $1 AND label = $2")
-            .bind(user_id)
-            .bind(label)
-            .fetch_optional(pool)
-            .await?
-            .flatten();
+    let delim: Option<String> = sqlx::query_scalar(
+        "SELECT hierarchy_delimiter FROM accounts WHERE user_id = $1 AND label = $2",
+    )
+    .bind(user_id)
+    .bind(label)
+    .fetch_optional(pool)
+    .await?
+    .flatten();
     let source_name = naming::from_display(rest, delim.and_then(|d| d.chars().next()));
 
     let row: Option<(i64, i64, i64)> = sqlx::query_as(

@@ -88,16 +88,15 @@ fn split_lines(mut data: &[u8]) -> Vec<&[u8]> {
 }
 
 fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack
-        .windows(needle.len())
-        .position(|w| w == needle)
+    haystack.windows(needle.len()).position(|w| w == needle)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const MSG: &[u8] = b"Subject: Hello\r\nFrom: a@b.c\r\nX-Long: one\r\n  two\r\n\r\nbody here\r\n";
+    const MSG: &[u8] =
+        b"Subject: Hello\r\nFrom: a@b.c\r\nX-Long: one\r\n  two\r\n\r\nbody here\r\n";
 
     #[test]
     fn splits_on_crlf() {

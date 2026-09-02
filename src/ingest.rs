@@ -223,9 +223,11 @@ pub async fn run(config: &Config, pool: &PgPool, address: &str) -> Result<()> {
         while let Some(item) = listing.next().await {
             let item = item?;
             // \Noselect entries are hierarchy placeholders, not mailboxes.
-            if item.attributes().iter().any(|a| {
-                matches!(a, async_imap::types::NameAttribute::NoSelect)
-            }) {
+            if item
+                .attributes()
+                .iter()
+                .any(|a| matches!(a, async_imap::types::NameAttribute::NoSelect))
+            {
                 continue;
             }
             // The source tells us its hierarchy separator; we previously
@@ -393,25 +395,23 @@ async fn ingest_folder(
         // mailbox — but everything after it is network round trips to S3 and
         // Postgres, which overlap happily.
         let fetched_len = fetched.len();
-        let mut outcomes = stream::iter(fetched.into_iter().map(
-            |(source_uid, raw, seen)| {
-                let pool = pool.clone();
-                let store = Arc::clone(store);
-                let account = account.clone();
-                let folder = folder.clone();
-                let name = name.to_string();
-                async move {
-                    // Retried individually: one S3 hiccup should cost a few
-                    // seconds, not the whole folder.
-                    with_retry(&format!("{name}/{source_uid}"), || {
-                        store_message(
-                            &pool, &store, &account, &folder, &name, source_uid, &raw, seen,
-                        )
-                    })
-                    .await
-                }
-            },
-        ))
+        let mut outcomes = stream::iter(fetched.into_iter().map(|(source_uid, raw, seen)| {
+            let pool = pool.clone();
+            let store = Arc::clone(store);
+            let account = account.clone();
+            let folder = folder.clone();
+            let name = name.to_string();
+            async move {
+                // Retried individually: one S3 hiccup should cost a few
+                // seconds, not the whole folder.
+                with_retry(&format!("{name}/{source_uid}"), || {
+                    store_message(
+                        &pool, &store, &account, &folder, &name, source_uid, &raw, seen,
+                    )
+                })
+                .await
+            }
+        }))
         .buffer_unordered(concurrency);
 
         // Consumed as results arrive rather than collected, so a slow batch
@@ -521,7 +521,8 @@ async fn store_message(
     )
     .await?;
 
-    let (uid, is_new) = db::place_message(pool, folder.id, message_id, source_uid as i64, seen).await?;
+    let (uid, is_new) =
+        db::place_message(pool, folder.id, message_id, source_uid as i64, seen).await?;
 
     // Written unconditionally, even when the placement already existed. The
     // manifest is derived data; rewriting it is cheap and makes a re-ingest

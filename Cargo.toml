@@ -37,6 +37,10 @@ argon2 = { version = "0.5", features = ["std"] }
 chacha20poly1305 = "0.10"
 rand = "0.8"
 rustls-pemfile = "2.2.0"
+# Prompts for passwords without echoing. Passwords must NOT come from argv: the
+# shell rewrites !, $, backticks and quotes before the program sees them, so the
+# stored hash ends up covering a different string than the one typed at login.
+rpassword = "7"
 # JSON contract shared with the web client, so a renamed field breaks the build
 # on whichever side has not caught up rather than at runtime.
 archive-api-types = { path = "api-types" }

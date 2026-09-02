@@ -33,12 +33,20 @@ impl Error {
 }
 
 /// Read a response, mapping status to [`Error`] before attempting to decode.
+///
+/// `auth_401` says what a 401 MEANS for this call, and the two meanings are not
+/// interchangeable. On an authenticated endpoint it means the session is gone,
+/// and the app should return to the login screen. On `login` itself it means
+/// the credentials were rejected — reporting that as "your session has expired"
+/// tells the user to do the exact thing they are already doing, and hides the
+/// server's actual message.
 async fn decode<T: serde::de::DeserializeOwned>(
     response: gloo_net::http::Response,
+    auth_401: bool,
 ) -> Result<T, Error> {
     let status = response.status();
 
-    if status == 401 {
+    if status == 401 && auth_401 {
         return Err(Error::Unauthorized);
     }
 
@@ -67,7 +75,7 @@ pub async fn session() -> Result<Identity, Error> {
         .send()
         .await
         .map_err(|e| Error::Transport(e.to_string()))?;
-    decode(response).await
+    decode(response, true).await
 }
 
 pub async fn login(login: String, password: String) -> Result<Identity, Error> {
@@ -77,7 +85,7 @@ pub async fn login(login: String, password: String) -> Result<Identity, Error> {
         .send()
         .await
         .map_err(|e| Error::Transport(e.to_string()))?;
-    decode(response).await
+    decode(response, false).await
 }
 
 pub async fn logout() -> Result<(), Error> {
@@ -96,7 +104,7 @@ pub async fn folders() -> Result<Vec<archive_api_types::Folder>, Error> {
         .send()
         .await
         .map_err(|e| Error::Transport(e.to_string()))?;
-    decode(response).await
+    decode(response, true).await
 }
 
 /// One page of a folder. `cursor` is passed back verbatim from a previous
@@ -116,7 +124,7 @@ pub async fn messages(
         .send()
         .await
         .map_err(|e| Error::Transport(e.to_string()))?;
-    decode(response).await
+    decode(response, true).await
 }
 
 fn encode(value: &str) -> String {
@@ -136,5 +144,5 @@ pub async fn message(blake3: &str) -> Result<archive_api_types::MessageDetail, E
         .send()
         .await
         .map_err(|e| Error::Transport(e.to_string()))?;
-    decode(response).await
+    decode(response, true).await
 }

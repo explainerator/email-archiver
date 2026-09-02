@@ -25,11 +25,10 @@ pub async fn run(config: &Config, pool: &PgPool, login: &str, deep: bool) -> Res
 
     println!("checking {login} (bucket {bucket})");
 
-    let messages: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM messages WHERE user_id = $1")
-            .bind(user_id)
-            .fetch_one(pool)
-            .await?;
+    let messages: i64 = sqlx::query_scalar("SELECT count(*) FROM messages WHERE user_id = $1")
+        .bind(user_id)
+        .fetch_one(pool)
+        .await?;
 
     let placements: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM placements p
@@ -46,7 +45,11 @@ pub async fn run(config: &Config, pool: &PgPool, login: &str, deep: bool) -> Res
     let manifests = store.list("manifest/").await?;
 
     println!("  postgres: {messages} messages, {placements} placements");
-    println!("  s3:       {} blobs, {} manifests", blobs.len(), manifests.len());
+    println!(
+        "  s3:       {} blobs, {} manifests",
+        blobs.len(),
+        manifests.len()
+    );
 
     let mut problems = Vec::new();
 
@@ -91,9 +94,11 @@ pub async fn run(config: &Config, pool: &PgPool, login: &str, deep: bool) -> Res
 
     let concurrency = config.ingest.concurrency;
     let store_ref = &store;
-    let results: Vec<(String, Result<()>)> = stream::iter(hashes.iter().map(|h| async move {
-        (h.clone(), store_ref.get_message(h).await.map(|_| ()))
-    }))
+    let results: Vec<(String, Result<()>)> = stream::iter(
+        hashes
+            .iter()
+            .map(|h| async move { (h.clone(), store_ref.get_message(h).await.map(|_| ())) }),
+    )
     .buffer_unordered(concurrency)
     .collect()
     .await;
@@ -107,7 +112,10 @@ pub async fn run(config: &Config, pool: &PgPool, login: &str, deep: bool) -> Res
     }
 
     if deep {
-        println!("  deep verify: {verified}/{} blobs read and hash-checked", hashes.len());
+        println!(
+            "  deep verify: {verified}/{} blobs read and hash-checked",
+            hashes.len()
+        );
     } else {
         println!(
             "  spot-check: {verified}/{} sampled blobs verified (use --deep for all)",
@@ -189,7 +197,10 @@ pub async fn backfill_headers(config: &Config, pool: &PgPool, login: &str) -> Re
         println!("headers: nothing to backfill for {login}");
         return Ok(());
     }
-    println!("backfilling headers for {} messages ({bucket})", missing.len());
+    println!(
+        "backfilling headers for {} messages ({bucket})",
+        missing.len()
+    );
 
     let store = Store::open(config, &bucket).await?;
     let store = &store;

@@ -86,8 +86,8 @@ fn build_acceptor(cert_path: &Path, key_path: &Path) -> Result<TlsAcceptor> {
 }
 
 fn load_certs(path: &Path) -> Result<Vec<CertificateDer<'static>>> {
-    let data = std::fs::read(path)
-        .with_context(|| format!("reading certificate {}", path.display()))?;
+    let data =
+        std::fs::read(path).with_context(|| format!("reading certificate {}", path.display()))?;
     let certs: Vec<_> = rustls_pemfile::certs(&mut data.as_slice())
         .collect::<std::result::Result<_, _>>()
         .with_context(|| format!("parsing certificate {}", path.display()))?;

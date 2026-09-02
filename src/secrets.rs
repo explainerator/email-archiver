@@ -105,8 +105,13 @@ impl SecretKey {
     }
 
     pub fn decrypt(&self, encoded: &str) -> Result<String> {
-        let raw = B64.decode(encoded.trim()).context("stored secret is not base64")?;
-        anyhow::ensure!(raw.len() > 24, "stored secret is too short to contain a nonce");
+        let raw = B64
+            .decode(encoded.trim())
+            .context("stored secret is not base64")?;
+        anyhow::ensure!(
+            raw.len() > 24,
+            "stored secret is too short to contain a nonce"
+        );
         let (nonce_bytes, ciphertext) = raw.split_at(24);
 
         let cipher = XChaCha20Poly1305::new(&self.0);

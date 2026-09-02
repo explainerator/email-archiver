@@ -165,8 +165,8 @@ impl Config {
                 path.display()
             )
         })?;
-        let config: Config = toml::from_str(&raw)
-            .with_context(|| format!("parsing {}", path.display()))?;
+        let config: Config =
+            toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
         config.validate()?;
         Ok(config)
     }
@@ -174,7 +174,10 @@ impl Config {
     fn validate(&self) -> Result<()> {
         anyhow::ensure!(!self.database.url.is_empty(), "database.url is empty");
         anyhow::ensure!(!self.s3.endpoint.is_empty(), "s3.endpoint is empty");
-        anyhow::ensure!(self.ingest.concurrency >= 1, "ingest.concurrency must be at least 1");
+        anyhow::ensure!(
+            self.ingest.concurrency >= 1,
+            "ingest.concurrency must be at least 1"
+        );
         anyhow::ensure!(
             !self.encryption_key.is_empty(),
             "encryption_key is empty. Generate one with: email-archiver generate-key"
@@ -215,7 +218,10 @@ impl fmt::Debug for Config {
             .field("database.url", &redact_url(&self.database.url))
             .field("s3.endpoint", &self.s3.endpoint)
             .field("s3.region", &self.s3.region)
-            .field("s3.buckets", &self.s3.credentials.keys().collect::<Vec<_>>())
+            .field(
+                "s3.buckets",
+                &self.s3.credentials.keys().collect::<Vec<_>>(),
+            )
             .field("encryption_key", &"<redacted>")
             .finish()
     }
@@ -298,7 +304,10 @@ mod tests {
 
         let rendered = format!("{config:?}");
         assert!(!rendered.contains("hunter2"), "password leaked: {rendered}");
-        assert!(!rendered.contains("topsecret"), "secret key leaked: {rendered}");
+        assert!(
+            !rendered.contains("topsecret"),
+            "secret key leaked: {rendered}"
+        );
         // The encryption key must never appear either — it is the one secret
         // whose exposure makes every stored source password readable.
         assert!(
@@ -325,7 +334,10 @@ mod tests {
         )
         .unwrap();
 
-        let err = config.credentials_for("absent-bucket").unwrap_err().to_string();
+        let err = config
+            .credentials_for("absent-bucket")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("absent-bucket"), "{err}");
     }
 }

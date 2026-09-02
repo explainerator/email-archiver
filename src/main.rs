@@ -14,8 +14,8 @@ mod listen;
 mod naming;
 mod ratelimit;
 mod secrets;
-mod session;
 mod server;
+mod session;
 mod store;
 mod tls;
 mod web;
@@ -48,13 +48,18 @@ USAGE:
         Print a fresh encryption key for config.toml. Changing this key makes
         every stored source password unreadable, so generate it once.
 
-    email-archiver set-password <login> <password>
-        Set an archive user's IMAP password (Argon2id). Until this is set the
-        account cannot be logged into at all.
+    email-archiver set-password <login>
+        Set an archive user's password (Argon2id), used by both IMAP and the web
+        client. Prompts twice, without echoing. Until this is set the account
+        cannot be logged into at all.
 
-    email-archiver set-source <address> <host> <username> <password> [--insecure-tls]
-        Store source mailbox credentials, encrypted. --insecure-tls accepts any
-        certificate for THIS source only.
+        Passing the password as an argument still works but is discouraged: the
+        shell rewrites !, $, backticks and quotes first, so the stored hash may
+        cover a string you cannot retype.
+
+    email-archiver set-source <address> <host> <username> [--insecure-tls]
+        Store source mailbox credentials, encrypted. Prompts for the password.
+        --insecure-tls accepts any certificate for THIS source only.
 
     email-archiver check <login> [--deep]
         Verify Postgres and S3 agree for one user. Samples 5 blobs by default;
@@ -143,7 +148,13 @@ async fn main() -> Result<()> {
 
         Some("set-password") => {
             let login = arg(&args, 1, "login")?;
-            let password = arg(&args, 2, "password")?;
+            let password = match args.get(2) {
+                Some(given) => {
+                    warn_argv_password();
+                    given.clone()
+                }
+                None => prompt_new_password()?,
+            };
             let pool = connect_db(&config).await?;
             db::set_user_password(&pool, &login, &password).await?;
             println!("password set for {login}");
@@ -154,7 +165,13 @@ async fn main() -> Result<()> {
             let address = arg(&args, 1, "address")?;
             let host = arg(&args, 2, "host")?;
             let username = arg(&args, 3, "username")?;
-            let password = arg(&args, 4, "password")?;
+            let password = match args.get(4).filter(|a| !a.starts_with("--")) {
+                Some(given) => {
+                    warn_argv_password();
+                    given.clone()
+                }
+                None => prompt_password("Source mailbox password: ")?,
+            };
             let insecure = args.iter().any(|a| a == "--insecure-tls");
             let pool = connect_db(&config).await?;
             db::set_source(
@@ -249,6 +266,70 @@ async fn main() -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// Read a password without echoing it.
+///
+/// **Never take a password from argv.** The shell rewrites `!`, `$`, backticks,
+/// quotes and backslashes before this program is even started, so a password
+/// containing any of them is stored as a hash of something the user cannot
+/// retype -- which presents as "the password stopped working" with no way to
+/// tell it from a forgotten one. It also lands in shell history and in the
+/// process list, where other users can read it.
+///
+/// stdin passes through untouched, so this is both safer and more correct.
+fn prompt_password(prompt: &str) -> Result<String> {
+    use std::io::IsTerminal;
+
+    // rpassword talks to the CONSOLE, not to stdin, so a redirect or a pipe
+    // never reaches it and the process waits for a keystroke that will never
+    // come. A deploy script calling this would hang indefinitely rather than
+    // fail, so piped input is handled explicitly instead.
+    let password = if std::io::stdin().is_terminal() {
+        rpassword::prompt_password(prompt).context("reading password")?
+    } else {
+        let mut line = String::new();
+        std::io::stdin()
+            .read_line(&mut line)
+            .context("reading password from stdin")?;
+        // Only the line ending is stripped. Trailing spaces can be part of a
+        // password, and silently trimming them would store a hash of something
+        // other than what was supplied.
+        line.trim_end_matches(['\r', '\n']).to_string()
+    };
+
+    anyhow::ensure!(!password.is_empty(), "password was empty");
+    Ok(password)
+}
+
+/// Prompt twice, so a typo becomes a retry rather than a lockout.
+///
+/// Worth the second prompt precisely because nothing echoes: a mistyped
+/// password is otherwise stored happily and only discovered at the next login,
+/// long after the typo is recoverable from memory.
+fn prompt_new_password() -> Result<String> {
+    use std::io::IsTerminal;
+
+    let first = prompt_password("New password: ")?;
+    // Piped input gets one line, not two: asking a script to repeat itself
+    // would just make it fail.
+    if !std::io::stdin().is_terminal() {
+        return Ok(first);
+    }
+    let again = prompt_password("Repeat password: ")?;
+    anyhow::ensure!(
+        first == again,
+        "passwords did not match; nothing was changed"
+    );
+    Ok(first)
+}
+
+fn warn_argv_password() {
+    eprintln!(
+        "WARNING: password given on the command line. Your shell may have
+         altered it (!, $, backticks, quotes), it is now in your shell history,
+         and it was visible in the process list. Omit it to be prompted instead."
+    );
 }
 
 fn arg(args: &[String], index: usize, name: &str) -> Result<String> {
