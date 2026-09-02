@@ -515,6 +515,31 @@ If a redirect is wanted later, the fix is moving certbot to `--webroot` served b
 not stop/start hooks around renewal, which take the archive down unattended at an hour
 nobody chose.
 
+### 9.5 Frontend toolchain — two things that bite on Windows
+
+**`dx` and `dioxus` must be the same version.** The CLI checks, and on a mismatch prints
+`dx and dioxus versions are incompatible` — and then *carries on building*. An error that
+does not stop the build is one you scroll past, so `web-ui/Cargo.toml` pins dioxus
+exactly (`=0.7.3`) to the installed CLI rather than using a caret range that cargo can
+drift. Bumping it means installing the matching CLI in the same commit:
+
+```
+cargo install dioxus-cli --version <same> --locked
+```
+
+**`wasm-opt` crashes on this machine** — `exit code: 0xc0000409`, a Windows stack-buffer
+crash inside the copy bundled with `dx`. `dx` logs it as an ERROR, then ships the
+*unoptimised* wasm and reports success, so the build is fine but ~2 MB instead of ~1.2 MB.
+Setting `[web.wasm_opt] level = "0"` does not help; it still invokes the tool.
+
+Rather than chase it, the server gzips: **2,040 KB → 520 KB on the wire**, which recovers
+more than wasm-opt would have. The ERROR line remains and is expected. If it is ever worth
+fixing, a newer `dx` (with its own newer wasm-opt) is the thing to try, and the dioxus pin
+moves with it.
+
+The build directory also accumulates old content-hashed files across builds, so a deploy
+should bundle from a clean output directory rather than whatever has piled up.
+
 ### 9.4 Deployment
 
 Its own systemd unit from the same binary, same `email-archiver` service user, so the

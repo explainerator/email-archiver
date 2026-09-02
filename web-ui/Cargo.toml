@@ -6,9 +6,15 @@ description = "Browser client for the email archive"
 license = "MIT"
 
 [dependencies]
-# Pinned deliberately. Dioxus APIs have moved between releases and this is a
-# program that should sit untouched for long stretches; see WEBAPP-PLAN.md W6.
-dioxus = { version = "0.7", features = ["web"] }
+# Pinned EXACTLY, and the pin must match the installed `dx`: the CLI refuses to
+# build a project whose dioxus differs from its own version. A caret range let
+# cargo drift to 0.7.10 against dx 0.7.3, which reports
+# "dx and dioxus versions are incompatible" and then keeps going -- an error
+# that does not stop the build is easy to miss entirely.
+#
+# Bumping this means installing the matching CLI in the same commit:
+#   cargo install dioxus-cli --version <same> --locked
+dioxus = { version = "=0.7.3", features = ["web"] }
 archive-api-types = { path = "../api-types" }
 gloo-net = { version = "0.6", features = ["http"] }
 serde = { version = "1", features = ["derive"] }

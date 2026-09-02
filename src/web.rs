@@ -171,6 +171,12 @@ fn router(state: AppState, assets: Option<PathBuf>) -> Result<Router> {
         None => app,
     };
 
+    // The wasm bundle is ~2 MB and compresses to a fraction of that. Worth more
+    // here than it would normally be: `dx`'s bundled wasm-opt crashes on
+    // Windows (WEBAPP-PLAN.md 9.5), so the wasm we ship is unoptimised, and
+    // gzip recovers most of what that costs over the wire.
+    let app = app.layer(tower_http::compression::CompressionLayer::new());
+
     // Cheap headers that apply to everything. The message-body CSP is a
     // separate and much stricter policy applied to the reading frame in phase
     // 4b; this is only the shell.

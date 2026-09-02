@@ -914,6 +914,7 @@ checksum = "ce2548391e9c1929c21bf6aa2680af86fe4c1b33e6cea9ac1cfeec0bd11218cf"
 dependencies = [
  "compression-core",
  "flate2",
+ "memchr",
 ]
 
 [[package]]
@@ -3448,6 +3449,7 @@ version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "08a05a66a4fdd61cbbe0a1d755ffe0ca6aba159dd4820936a0ff8a8278245b9c"
 dependencies = [
+ "async-compression",
  "bitflags",
  "bytes",
  "futures-core",
@@ -4066,26 +4068,6 @@ name = "message-broker-common"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "message_client"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "config"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "gerns_utilities"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "message_types"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "message-protocol"
-version = "0.1.0"
-
-[[patch.unused]]
 name = "telemetry"
 version = "0.1.0"
 
@@ -4095,4 +4077,24 @@ version = "0.1.0"
 
 [[patch.unused]]
 name = "auth-service-webapp-client"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "message-protocol"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "gerns_utilities"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "message_client"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "message_types"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "config"
 version = "0.1.0"
