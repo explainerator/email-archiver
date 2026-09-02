@@ -55,3 +55,32 @@ output "ssh_command" {
     for a in ovh_cloud_project_instance.stalwart.addresses : a.ip if a.version == 4
   ]))
 }
+
+# -----------------------------------------------------------------------------
+# Deployment
+# -----------------------------------------------------------------------------
+# Read by `deploy email-archiver` (tools/gern-shell/archiver.sh) so the domain
+# is written in exactly one place. The deploy checks the name resolves to
+# instance_ipv4 before asking certbot to prove control over it -- a failed
+# challenge counts against Let's Encrypt's rate limit, so it is worth one DNS
+# lookup to avoid.
+
+output "archive_domain" {
+  description = "Hostname clients connect to, and the name on the certificate."
+  value       = var.archive_domain
+}
+
+output "certbot_email" {
+  description = "Contact address for Let's Encrypt expiry notices."
+  value       = var.certbot_email
+}
+
+output "tls_cert_path" {
+  description = "Certificate path on the instance, as written into config.toml."
+  value       = local.tls_cert_path
+}
+
+output "tls_key_path" {
+  description = "Private key path on the instance, as written into config.toml."
+  value       = local.tls_key_path
+}

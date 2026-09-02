@@ -374,19 +374,81 @@ amount of moving parts.
 the lifecycle block, second removes the resource.
 
 Terraform files retained: `instance.tf`, `storage.tf`, `providers.tf`, `variables.tf`,
-`outputs.tf`, `files/cloud-init.yaml`. A `deploy.tf` will be needed again for the new
-program. The abandoned Stalwart deployment used an SSH provisioner chain
-(`firewall -> docker_install -> transfer_files -> start`); that shape is still the model to
-follow, but it is not recoverable from this repository.
+`outputs.tf`, `config.tf`, `files/cloud-init.yaml`.
+
+### 4.2 Deployment — `deploy email-archiver`
+
+**There is no `deploy.tf`.** Terraform provisions and renders; it does not push software.
+The split:
+
+| Terraform owns | The deploy command owns |
+|---|---|
+| Instance, buckets, credentials, firewall | Building the binary and shipping it |
+| `archive_domain`, `certbot_email` — the domain is written in exactly one place | Obtaining the certificate, installing the unit, restarting |
+| Rendering `config.toml` (a sensitive output; never written into the repo) | Placing that config at `/etc/email-archiver/config.toml`, mode 0640 |
+
+Terraform *could* have run certbot through a `null_resource` provisioner. It was not used:
+provisioners run only when their triggers change, so the certificate would be obtained on
+a plan Terraform believes is a no-op, and a machine step that has to be idempotent and
+re-runnable is not what Terraform state is for. The deploy command runs the same script
+in full on every deploy, and each step either already holds or is made to hold.
+
+`deploy email-archiver` lives in `tools/gern-shell/archiver.sh` and registers itself via
+`register_deployer` (`tools/gern-shell/core.sh`), so `deploy.sh` needs no special case per
+service. Sequence: check the A record resolves to the instance → check SSH → render the
+config from Terraform state → cross-build for Linux → verify the binary's glibc floor
+against the instance → upload to a 0700 staging directory → provision → verify.
+
+**The binary is built here and shipped, not built on the instance.** A toolchain on the
+archive host is one more thing to patch, and a 2 vCPU box is slow to link this. The build
+runs in WSL (Ubuntu 24.04, the same release as the instance), so it is a plain glibc build
+rather than a static musl one — and that assumption is *checked* at deploy time by
+comparing the binary's highest `GLIBC_x.y` symbol against the instance's, rather than
+trusted. A newer instance is fine; an older one fails loudly instead of shipping something
+that dies at exec with a loader error.
+
+Two preflight checks exist because of what they cost to get wrong. The **DNS check** runs
+before certbot is invoked at all: Let's Encrypt rate-limits failed authorisations, so a
+name pointing at the wrong address is worth one lookup to catch. The **verify step**
+connects to :993 and reads the IMAP greeting, because `systemctl restart` returns as soon
+as the process is spawned — a service that starts and immediately dies on a bad config
+still exits 0. That check is what separates "deployed" from "running".
+
+`status` gains an `archive` location alongside `remote`, `local` and `vps`: the unit, the
+certificate's remaining days, whether 993 is listening, and disk.
 
 ---
 
 ## 5. TLS
 
-`rustls-acme`, TLS-ALPN-01 on :443, for `archive.thebackroom420.ca`. Certificate cached on
-the boot disk; on rebuild it simply re-issues.
+**certbot on the host, not an ACME client in the binary.** The original plan was
+`rustls-acme` doing TLS-ALPN-01 on :443; what shipped reads certificate files from disk
+instead, and lets `certbot certonly --standalone` obtain and renew them over HTTP-01 on
+:80.
 
-Ports: **993** IMAPS (public), **443** ACME only, **80** unused, **25/587** closed.
+The trade, stated plainly: an in-process client would have been one fewer package on the
+host and would have needed no port 80. Against that, ACME is a protocol with retries,
+rate limits and account state, and putting it inside the archiver means our bugs can cost
+us a certificate. certbot is packaged, patched by `unattended-upgrades`, and renews from
+its own systemd timer whether or not the archiver is running. For a program whose entire
+justification is a small maintenance surface, borrowing a solved problem beat owning it.
+
+Two consequences worth knowing:
+
+* **Renewal happens behind the program's back**, so `src/tls.rs` re-reads the certificate
+  when its mtime changes rather than reading it once at startup. A renewal is picked up
+  without a restart and without dropping a connection. A failed reload keeps the previous
+  certificate — a half-written file mid-renewal is transient, and refusing every
+  connection over it would be the worse outcome.
+* **certbot writes the key root-owned and 0700**, which an unprivileged service cannot
+  read. Rather than run the archiver as root or copy the key somewhere looser, a certbot
+  **renewal deploy hook** opens `live/` and `archive/` to the `email-archiver` group. It
+  is a hook rather than a one-time chmod because certbot restores the default modes on
+  every renewal — a chmod at install time would work for ninety days and then silently
+  stop.
+
+Ports: **993** IMAPS (public), **80** HTTP-01 challenge (certbot only, nothing listens
+there otherwise), **443** unused, **25/587** closed.
 
 ---
 
@@ -465,7 +527,7 @@ Refuse. The value here is that it does one thing.
 | **4** | ✅ IMAP spike against Thunderbird | Done — `imap-next` has a real `Server` type; R1 resolved, no `imap-codec` fallback needed |
 | **5** | ✅ LIST, LSUB, SELECT, FETCH · ⬜ STATUS, SEARCH | Thunderbird logs in, browses 47 folders and displays bodies. **ENVELOPE and BODYSTRUCTURE turn out not to be needed** — Thunderbird builds its list from `BODY.PEEK[HEADER.FIELDS (...)]` |
 | **6** | §6.2 rebuild test — drop the schema, reindex from S3 | Identical count, UIDs, structure |
-| **7** | ACME, `deploy.tf`, **systemd unit running the binary directly** (no Docker) | Running under TLS on the instance |
+| **7** | ⬜ certbot, `deploy email-archiver`, **systemd unit running the binary directly** (no Docker) | Running under TLS on the instance. Code complete and statically checked; **not yet run against the instance** |
 | **8a** | **Google Workspace accounts** — OAuth2 path, small data, *hard deadline* (R3) | Business mail archived before those accounts close |
 | **8b** | Self-hosted `twoducks.ca` ~15 GB, then the remainder | Complete archive |
 

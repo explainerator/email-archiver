@@ -1,0 +1,548 @@
+# archive-web — a browser client for the mail archive
+
+Status: **design, not started.** Companion to `ARCHIVE-PLAN.md`, which stays the
+authority on storage, ingest and IMAP.
+
+---
+
+## 1. What this is
+
+A small web client so the users who live in webmail can read their archive. Login page,
+then three panes: folders on the left, a message list in the middle (from, subject, date),
+a reading pane on the right.
+
+It exists because of an asymmetry we already knew about but had not priced. Thunderbird
+users hold a full local copy of their archive; the archive is a *backup* to them. Webmail
+users hold nothing locally — for them this app **is** the archive, and it is the only way
+they will ever see mail from an account that has since been closed.
+
+That difference drives three decisions later in this document: search stops being optional
+(§8), the reading pane has to render hostile HTML properly rather than showing plain text
+(§6), and attachments have to be downloadable (§7).
+
+---
+
+## 2. Not IMAP
+
+> "Since it will be done in dioxus, you should use the IMAP libraries you already know
+> about."
+
+**The browser cannot speak IMAP, so the webapp will not use one.** IMAP is a TCP protocol;
+WASM in a browser tab has no raw sockets, only HTTP and WebSockets. There is no build of
+`async-imap` or `imap-next` that changes this — the limitation is the browser sandbox, not
+the crates.
+
+It would be a detour even if it worked. The data is in Postgres and S3. A request path of
+*browser → HTTP → server → IMAP → same server → Postgres* would serialise our own data
+into IMAP wire format purely to parse it back. The IMAP server exists to satisfy
+Thunderbird, which cannot speak anything else. The webapp has no such constraint.
+
+`imap-next` and `async-imap` stay exactly where they are — serving Thunderbird and pulling
+from source mailboxes respectively.
+
+---
+
+## 3. Architecture
+
+### 3.1 A REST API in the existing binary
+
+**`email-archiver serve-web` — a new subcommand beside `serve`.** No new crate, no
+refactor.
+
+The endpoints reuse `db`, `store` and `fetch` directly, exactly as `server.rs` does. They
+also inherit `Config::load`, `connect_db` (so migrations run, and the `current_database()
+= 'archive'` guard applies) and the existing `CertReloader` for free.
+
+An earlier draft of this plan proposed splitting a shared `archive-core` library out
+first, and argued that one binary serving both IMAP and HTTP would repeat the problem that
+made Stalwart unworkable. **That argument was wrong** and is withdrawn: Stalwart's problem
+was its configuration model, not that it was a single process. This binary already holds
+the CLI, ingest and an IMAP server; an HTTP handler is not a categorical change. Splitting
+later, with six months of evidence about what actually grew, is a better-informed decision
+than splitting now — and it removes a refactor of working code from the critical path.
+
+### 3.2 REST, not server functions
+
+Dioxus fullstack's server functions earn their keep when the API surface is large enough
+that hand-writing a client is real work. This one is nine endpoints; the client is about a
+hundred lines of `fetch`.
+
+Against that, fullstack costs: client and server must build together, nothing can be
+tested with `curl`, and the frontend framework choice gets welded to the backend.
+
+Plain REST gives testability, a second client someday for free (a script, a phone app),
+and — the point that decides it — **the frontend becomes replaceable without touching the
+backend.** If Dioxus proves irritating, that is a rewrite of one artifact, not two.
+
+### 3.3 Frontend: Dioxus
+
+Rust with `serde` DTOs **shared between server and client**, so the wire format is defined
+once and cannot drift. The alternative — hand-maintained TypeScript interfaces, or a
+codegen step — is most of the integration risk in a project like this.
+
+Also: no Node toolchain to install, patch or fight on Windows.
+
+The usual objection to Dioxus, a thin component ecosystem, does not bite here. A folder
+tree, a virtualised table and a reading pane are components you would write by hand in
+React too.
+
+The real cost is **version churn** — Dioxus is young and its APIs have moved between
+releases. Pin the version; treat an upgrade as scheduled work rather than something done
+casually. See W6.
+
+Built to WASM and **served as static assets by the same binary**, so there is one process,
+one port and one thing to deploy.
+
+### 3.4 Endpoints
+
+All under `/api`. All except `login` require a session and are scoped to its user (§4.4).
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/api/login` | `{login, password}` → sets the session cookie |
+| `POST` | `/api/logout` | Clears it |
+| `GET` | `/api/session` | Who am I — lets the app boot without a login round trip |
+| `GET` | `/api/folders` | Tree with unread counts |
+| `GET` | `/api/folders/{id}/messages` | List page; keyset cursor `?before=<date>,<uid>&limit=` |
+| `GET` | `/api/messages/{blake3}` | Headers, text part, sanitised HTML, part list |
+| `GET` | `/api/messages/{blake3}/parts/{n}` | Attachment download (§7) |
+| `PATCH` | `/api/placements/{folder_id}/{uid}` | `{seen: bool}` — the only write in the API |
+| `GET` | `/api/search` | `?q=&folder=` (§8) |
+
+Everything else is `GET` of static assets.
+
+---
+
+## 4. Authentication
+
+### 4.1 Credentials
+
+Reuse `users.password_hash` and `db::authenticate` unchanged. One password per person,
+working for both Thunderbird and the web client. A second credential store would mean two
+things to rotate and two ways to be locked out.
+
+### 4.2 Sessions
+
+A signed cookie carrying `user_id` and an expiry, HMAC'd with a key from `config.toml`
+(generated like `encryption_key`). `HttpOnly` and `SameSite=Lax` always.
+
+**`Secure` is set only when serving TLS.** This is not a preference — a `Secure` cookie is
+never sent over plaintext HTTP, so hardcoding it would make local development silently
+fail to stay logged in, with no error to explain why. The flag follows the listener's
+mode (§9.1), which means the production cookie always carries it and the loopback one
+never needs to.
+
+Stateless deliberately: with four users, a `sessions` table buys revocation we have no
+mechanism to trigger, and adds a write path to a schema whose defining property is that
+almost nothing writes to it. If "log out everywhere" is ever wanted, rotating the signing
+key does it for everyone at once — the honest amount of machinery at this scale.
+
+Expiry: 30 days, sliding. These are archives, not bank accounts, and a login prompt every
+session is what pushes people toward a weak password.
+
+### 4.3 Brute force
+
+Argon2id already makes guessing expensive, and the failure path deliberately cannot
+distinguish an unknown login from a wrong password (existing `db::authenticate`
+behaviour). Add an in-memory per-IP and per-login counter — ten failures in five minutes,
+then a fixed delay. In-memory is enough: a restart clearing the counters is not a
+meaningful bypass when every attempt still costs an Argon2 hash.
+
+### 4.4 The isolation rule
+
+**Every query is scoped by the authenticated `user_id`, in one place.** A `UserScope(i64)`
+newtype, constructible only by the session middleware and required by every scoped call,
+so an endpoint that forgets it does not compile. Not a convention — a type.
+
+This matters more here than in IMAP. IMAP has one connection per authenticated user; HTTP
+is stateless and every request re-establishes who is asking. Per-user buckets with scoped
+S3 credentials are the backstop, but they only catch a mistake at the storage layer — a
+wrong `WHERE` clause leaks metadata without ever touching S3.
+
+Note `/api/messages/{blake3}`: the hash is user-supplied, so it must be resolved through
+`messages.user_id`, never fetched from the bucket on the client's say-so.
+
+---
+
+## 5. The three panes
+
+### 5.1 Folders
+
+`folders` joined to `accounts` for the user, presented as the namespaced tree Thunderbird
+sees (`work/INBOX`), split on the account's `hierarchy_delimiter`. Unread counts from
+`placements` where `seen = false`.
+
+The archive-root INBOX is empty by construction and should be hidden here rather than
+shown as a permanently empty folder — it exists only because IMAP requires it.
+
+### 5.2 Message list
+
+Already indexed for this. `messages` carries `subject`, `from_addr` and `internaldate` as
+denormalised columns, so **the list view needs no new schema** — it joins `placements`
+(PK `(folder_id, uid)`) to `messages` by primary key and reads three columns plus `seen`.
+
+Sort by `internaldate` descending. **Keyset pagination, not `OFFSET`**: the main INBOX has
+~53,000 messages and `OFFSET 50000` re-walks every skipped row. Page on
+`(internaldate, uid) < (last_date, last_uid)`.
+
+There is no index on `(folder_id, internaldate)`; one would require denormalising
+`internaldate` into `placements`, since an index cannot span a join. **Measure first.**
+Sorting 53,000 rows may well be tens of milliseconds, and a denormalised column that has
+to be kept correct is not free.
+
+### 5.3 Reading pane
+
+Body from S3 by `blake3` via `store::get_message`, which re-hashes on read and rejects a
+mismatch. Parsed with `mail-parser`, already a dependency.
+
+`messages.headers` (migration 0003) caches the header block, so the list and the header
+display never touch S3. Only the body does.
+
+**Both body representations are returned together**, and the pane offers a "view plain
+text" toggle whenever a `text/plain` part exists. Most HTML mail is
+`multipart/alternative` and ships one — it is the sender's own fallback, written by them,
+and it is a far better answer to a badly-rendered message than anything we could
+reconstruct from mangled HTML.
+
+It costs essentially nothing: `messages.bodystructure` already records whether the part
+exists, and the raw message is fetched once regardless, so both parts come out of the same
+parse. The payoff is that "this message looks wrong" has an answer the user can act on
+immediately, instead of becoming a bug report that waits on a code change.
+
+Where a message has *only* an HTML part, the toggle is absent rather than showing an empty
+pane.
+
+Read state: `PATCH` sets `placements.seen` — the only write the web client can perform,
+enforced by the schema rather than by our carefulness, since `seen` is the only mutable
+column and is a boolean rather than a flag array for exactly this reason.
+
+---
+
+## 6. Rendering hostile HTML — the largest risk in this design
+
+Every message is untrusted input that arrived from the internet, rendered inside an
+authenticated session. This is the part most likely to go wrong.
+
+**The allowlist is deliberately brutal: structural HTML only, and no styling at all.**
+Some mail will render badly. That is an accepted, stated cost — a newsletter that looks
+wrong is a complaint; a message that runs code is an incident. Loosening this later with
+evidence about which specific messages broke is easy; tightening it after a leak is not.
+
+### 6.1 Elements allowed
+
+Nothing outside this list survives.
+
+| Group | Elements |
+|---|---|
+| Block | `p` `div` `br` `hr` `blockquote` `pre` |
+| Heading | `h1`–`h6` |
+| Inline | `span` `strong` `b` `em` `i` `u` `s` `sub` `sup` `code` `small` |
+| List | `ul` `ol` `li` `dl` `dt` `dd` |
+| Table | `table` `thead` `tbody` `tfoot` `tr` `td` `th` `caption` |
+| Link | `a` |
+| Image | `img` (§6.3) |
+
+Tables stay despite being a layout hack in mail, because they are structurally inert and
+dropping them turns most newsletters into an unreadable run of concatenated text rather
+than something merely ugly.
+
+### 6.2 Attributes allowed
+
+This is where strictness actually bites, and the list is nearly empty:
+
+| Element | Attributes |
+|---|---|
+| `a` | `href` |
+| `img` | `src` `alt` |
+| `td` `th` | `colspan` `rowspan` |
+| everything else | **none** |
+
+**`style` is dropped everywhere.** No exceptions. Inline CSS is the main vector for
+overlay and click-jacking tricks, for CSS-based exfiltration through attribute selectors
+and background URLs, and for hiding text from the reader that is visible to a parser.
+Dropping it also removes the need for `style-src 'unsafe-inline'` in the CSP below —
+which is the single biggest strength gain available here, and the reason to accept the
+rendering loss.
+
+Also dropped: `class`, `id`, `width`, `height`, `align`, `valign`, `bgcolor`, `border`,
+`target`, `srcset`, `background`, every `data-*`, and every `on*` handler.
+
+`a` is rewritten server-side to carry `rel="noopener noreferrer nofollow"` and
+`target="_blank"` — added by us, never taken from the message.
+
+### 6.3 URL schemes
+
+`href` accepts **`http`, `https`, `mailto` only**. `img src` accepts **`cid:` only**
+(§6.4). Everything else — `javascript:`, `data:`, `vbscript:`, `file:`, protocol-relative
+`//host`, and anything unrecognised — causes the attribute to be dropped and the element
+kept as inert text.
+
+URLs are re-parsed **after** sanitisation and re-validated before serialising. Parsing
+once and trusting the result is how parser-differential bugs get through: the sanitiser's
+view of a mangled URL and the browser's need not agree.
+
+### 6.4 Images
+
+Two separate concerns, often conflated:
+
+**Remote images are blocked by default.** They are tracking pixels — they tell a sender
+the message was read, when, and from which IP. `src` is rewritten to a placeholder, with
+the "load remote images" button every mail client has. For old archived mail the default
+should be off, and this is a privacy control as much as a security one.
+
+**Inline (`cid:`) images are rewritten to a same-origin URL** pointing at a dedicated
+endpoint, distinct from the attachment download in §7. That endpoint:
+
+- serves **only** parts whose **magic bytes** match PNG, JPEG, GIF or WebP
+- sets `Content-Type` from that sniff — never from the message's declared MIME type
+- sets `X-Content-Type-Options: nosniff` and `Content-Disposition: inline`
+- serves under `Content-Security-Policy: default-src 'none'`
+
+Rewriting to a same-origin URL rather than inlining `data:` URIs keeps the payload small,
+lets the browser cache, and — more importantly — means the CSP below can be `img-src
+'self'` with no `data:` allowance at all.
+
+### 6.5 Sandbox
+
+The sanitised body renders in `<iframe sandbox srcdoc="...">` with **`allow-scripts`
+absent**, and without `allow-same-origin` (so the frame gets an opaque origin and cannot
+reach the session cookie or the DOM around it).
+
+Not redundant with sanitising. The sanitiser is our code and may have a gap; the sandbox
+is the browser's and holds when it does. Neither is trusted alone.
+
+### 6.6 CSP
+
+Because `style` is gone and images are same-origin, the frame policy can be genuinely
+restrictive:
+
+```
+default-src 'none'; img-src 'self'; style-src 'sha256-<our block>'; form-action 'none'; base-uri 'none'
+```
+
+The `sha256` hash covers **one** stylesheet — ours, injected into the frame for basic
+legibility (`img { max-width: 100% }`, word wrapping, a readable font). Any other style
+block, including one that somehow survived sanitisation, fails the hash and is refused.
+That is strictly stronger than `'unsafe-inline'`, and it is only reachable because we
+dropped author styles entirely.
+
+The app itself, outside the frame: `default-src 'self'; frame-src 'self'; object-src
+'none'; base-uri 'none'; form-action 'self'`.
+
+### 6.7 Also stripped
+
+`<script>`, `<style>`, `<link>`, `<meta>`, `<base>`, `<iframe>`, `<object>`, `<embed>`,
+`<applet>`, `<form>` and all form controls, `<svg>`, `<math>`, `<canvas>`, `<audio>`,
+`<video>`, `<frame>`, `<frameset>`, `<marquee>` — **element and contents both**, not
+unwrapped. A `<style>` block whose tags are removed but whose text is kept would render
+the CSS as visible garbage.
+
+HTML comments are stripped: Outlook conditional comments can hide markup from a naive
+parser while remaining live to a browser.
+
+Sanitisation is parse-then-reserialise (`ammonia`, on `html5ever`), never regex. Regex
+over HTML loses to nesting and encoding tricks every time.
+
+### 6.8 Plain text
+
+Text parts get `white-space: pre-wrap`, HTML-escaped, with no HTML interpretation at all.
+This is the Phase 4a path and carries none of the above risk — which is why it ships
+first.
+
+### 6.9 Accepted breakage
+
+Stated plainly so it is not reported later as a defect: messages relying on inline CSS for
+layout, colour or spacing will render as unstyled structural HTML. Background images
+vanish. Multi-column newsletter layouts collapse to a single column. Web fonts do not
+load.
+
+The content is fully readable and no information is lost — only presentation. Revisit
+with a list of specific messages that broke, if it ever actually matters.
+
+**The escape hatch is the plain-text alternative** (§5.3), not a looser allowlist. When a
+message renders badly, the sender's own `text/plain` part is one click away, and it is
+usually the better artifact anyway. That makes bad rendering a mild annoyance rather than
+a reason to weaken §6 — which is the point of having it.
+
+Worth being precise about *why* this degrades gracefully, because it is not "only spam
+uses styling". The heaviest HTML in a real mailbox is **transactional** — receipts,
+invoices, itineraries, booking confirmations — and in an archive those are among the most
+valuable things stored. They survive because **tables are kept** (§6.1): structure and
+data remain, only colour, logos and spacing are lost. Spam degrades worst simply because
+it is the most presentation-dependent content there is.
+
+If anyone later proposes dropping tables as well, that is the change that would actually
+destroy something worth keeping.
+
+---
+
+## 7. Attachments
+
+**Two endpoints, deliberately separate**, because they have opposite jobs. The inline
+image endpoint (§6.4) serves a narrow set of sniffed image types for display inside the
+sandboxed frame. This one serves *anything* the message contains, and must therefore never
+be displayed — only saved. Merging them would mean one handler whose safety depends on a
+flag, which is the shape of bug that gets introduced during a later refactor.
+
+Downloads: streamed from S3, never inline:
+
+- `Content-Disposition: attachment` always, including images and PDFs
+- `X-Content-Type-Options: nosniff`
+- `Content-Type` from **our own** extension mapping, not the message's declared MIME type —
+  an attacker controls that field, and a wrong `text/html` served same-origin is XSS with
+  the sandbox bypassed
+- Filenames sanitised: path separators and control characters stripped
+
+Addressed by `(blake3, part_index)`. `messages.bodystructure` already holds the part tree,
+so listing parts needs no re-parse of the body.
+
+---
+
+## 8. Search — this reverses an earlier decision
+
+Search was previously judged unnecessary: *"my email clients end up downloading
+everything, so a search index could easily be overkill."* Sound reasoning that does not
+survive this change — it rested on the client holding a local copy. **Webmail users have
+no local copy, so server-side search is the only search they get.** An archive of 53,000
+messages you can only page through is close to useless.
+
+1. **Substring on `subject` and `from_addr`.** Already denormalised. `ILIKE '%term%'` plus
+   a `pg_trgm` GIN index — one migration, and one `ARCHIVE-PLAN.md` already anticipated
+   ("revisit with pg_trgm in Phase 5 if they prove slow at real volume"). Covers most of
+   what people actually search for.
+
+2. **Full text over bodies**, only if 1 proves insufficient. Needs body text extracted at
+   ingest into a `tsvector`, a backfill across every archived message, and real storage.
+   Not speculative work to do now.
+
+Start at 1, ship, see whether 2 is ever asked for.
+
+---
+
+## 9. Running it
+
+### 9.1 Local and production are the same binary, different listeners
+
+Mirrors the rule `serve` already applies to IMAP, for the same reason — a plaintext
+listener on a public address hands credentials to anyone on the path — so the two
+subcommands behave consistently rather than each having their own logic to remember.
+
+| | Local | Production |
+|---|---|---|
+| Command | `email-archiver serve-web` | `email-archiver serve-web 0.0.0.0:443` |
+| Default bind | `127.0.0.1:8000` | — |
+| TLS | None | `CertReloader`, the certbot cert |
+| Cookie `Secure` | Off | On |
+| CSP | No `upgrade-insecure-requests` | With it |
+
+**The guard:** plaintext is permitted on loopback and refused anywhere else unless
+`--allow-plaintext` is passed, which warns loudly. Identical to `serve`. TLS is used when
+`tls.cert_path` and `tls.key_path` are set — the same config the IMAP listener reads, so
+there is nothing extra to configure for production.
+
+Serving HTTPS directly from the binary via `CertReloader` means no reverse proxy: same
+certificate, same mtime-triggered reload, no Caddy or nginx as a third moving part on a
+box currently running one process.
+
+### 9.2 The frontend during development
+
+`dx serve` runs its own dev server with hot reload on a different port from the API, which
+means a cross-origin request in development and not in production.
+
+Proxy `/api` from the Dioxus dev server to `127.0.0.1:8000` rather than enabling CORS.
+Same-origin in both environments keeps `SameSite=Lax` honest and avoids a permissive CORS
+policy existing in the codebase at all — the kind of setting that gets copied into
+production later by someone in a hurry.
+
+### 9.3 Port 80 must stay free — the failure that surfaces in 90 days
+
+`certbot --standalone` binds port 80 to answer the HTTP-01 challenge **at every renewal**,
+not just at issuance. Binding 80 for an HTTP→HTTPS redirect would work for about three
+months and then silently fail renewal; the first symptom would be clients refusing an
+expired certificate.
+
+So **`serve-web` binds 443 only** in production. Users type `https://`. The
+`tls-certificate` row in `status` is the safety net if this is ever gotten wrong.
+
+If a redirect is wanted later, the fix is moving certbot to `--webroot` served by the app —
+not stop/start hooks around renewal, which take the archive down unattended at an hour
+nobody chose.
+
+### 9.4 Deployment
+
+Its own systemd unit from the same binary, same `email-archiver` service user, so the
+certbot renewal hook that opens the certificate to that group already covers it. Same
+hardening, plus `443` needs `CAP_NET_BIND_SERVICE` — already granted.
+
+443 is already open in UFW from the original cloud-init.
+
+The existing `deploy email-archiver` grows a second unit rather than gaining a second
+deployer: one binary, one upload, two units.
+
+---
+
+## 10. What this deliberately does not do
+
+- **No sending.** The archive has no submission path and this does not add one.
+- **No deleting, moving or flagging** beyond `\Seen`. Enforced by the schema.
+- **No folder management.**
+- **No multi-account merging.** Folders stay namespaced by account label, as in
+  Thunderbird.
+- **No mobile layout initially.** Three panes do not fold onto a phone, and doing it well
+  is its own piece of work. Worth knowing before someone opens it on a phone and reports
+  it broken.
+
+---
+
+## 11. Risks
+
+| # | Risk | Handling |
+|---|---|---|
+| W1 | **HTML rendering** — XSS or tracking via a message body | §6: structural-only allowlist, **no `style` at all**, opaque-origin sandbox, hash-pinned CSP, remote images off. The one to get right. |
+| W1b | **Strict sanitisation breaks legitimate mail** | Accepted and documented (§6.9). Loosening later with a list of real broken messages is easy; tightening after a leak is not. |
+| W2 | **Cross-user leakage** from a query missing its `user_id` | `UserScope` newtype (§4.4); per-user buckets as backstop |
+| W3 | **Attachment content-type confusion** | Our extension mapping, never the message's claim; always `attachment` (§7) |
+| W4 | **Renewal breaks when something takes port 80** | §9.3; `status` shows days remaining |
+| W5 | **Deep pagination slow at 53k messages** | Keyset pagination from the start; index only if measured (§5.2) |
+| W6 | **Dioxus version churn** | Pin it; upgrades are scheduled work, not incidental |
+| W7 | **A plaintext listener reaching production** | Loopback-only default, explicit `--allow-plaintext` with a warning, `Secure` cookie tied to TLS (§9.1) |
+| W8 | **HTTP handlers destabilise the IMAP server** — same process, shared pool | Separate systemd units, so a web restart never interrupts Thunderbird; `database.max_connections` covers both |
+
+---
+
+## 12. Phasing
+
+| Phase | Work | Gate |
+|---|---|---|
+| **1** | `serve-web` skeleton: axum, static assets, `127.0.0.1:8000` plaintext | Health endpoint answers locally |
+| **2** | Login, session cookie, `UserScope` | No data reachable unauthenticated |
+| **3** | Folder pane + message list, keyset pagination | Browse the 53k INBOX without a slow page |
+| **4a** | Reading pane, **plain text only** | Message bodies readable |
+| **4b** | Sanitised HTML (§6) | A known-hostile message renders inert |
+| **5** | Attachments; `\Seen` on read | Download works; read state agrees with Thunderbird |
+| **6** | Search step 1 (subject/from + `pg_trgm`) | Finding a known message takes one query |
+| **7** | TLS on 443, systemd unit, `status` rows | Reachable in production; certificate renews |
+
+Phase 4 is split deliberately: plain text is genuinely useful on its own, so the HTML work
+never blocks anyone's access to their mail.
+
+Phases 1–6 are all doable against a local plaintext server, so TLS is needed only at the
+end rather than being setup friction on day one.
+
+---
+
+## 13. Open questions
+
+**Q1 — Dioxus version.** 0.6 and 0.7 differ in project setup. Which is current at
+implementation time, and pin to it. *Answer before Phase 1.*
+
+**Q2 — Hostname.** Reuse `archive.thebackroom420.ca` on 443 (IMAPS is on 993, so no
+clash), or a separate `mail.thebackroom420.ca`? Reusing means one certificate and no DNS
+change, and is the assumption above.
+
+**Q3 — Folder presentation.** Thunderbird shows the raw namespaced path (`work/INBOX`).
+The web client could group by account instead. Cosmetic, but decide before Phase 3.
+
+**Q4 — Session signing key.** Generate alongside `encryption_key` and deliver via
+Terraform, or derive from it? Deriving means one secret to protect; separate means
+invalidating sessions never touches stored passwords. *Leaning separate.*

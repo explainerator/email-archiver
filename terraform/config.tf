@@ -41,16 +41,56 @@ variable "database_max_connections" {
   default     = 8
 }
 
+variable "archive_domain" {
+  description = <<-EOT
+    Public hostname clients connect to, and the name on the certificate. Its A
+    record must already resolve to instance_ipv4 before a deploy: certbot
+    proves control over the name by answering an HTTP challenge on port 80, and
+    a name that does not resolve here fails that challenge.
+
+    This is the single place the domain is written. The certificate paths below
+    are derived from it, and `deploy email-archiver` reads it back out of the
+    archive_domain output rather than keeping its own copy.
+  EOT
+  type        = string
+  default     = "archive.thebackroom420.ca"
+}
+
+variable "certbot_email" {
+  description = <<-EOT
+    Contact address for Let's Encrypt expiry notices. Worth setting to
+    something read: it is the warning that arrives if renewal has been quietly
+    failing, which is otherwise invisible until clients stop connecting.
+  EOT
+  type        = string
+  default     = "twoducks.ca@gmail.com"
+}
+
+# Certificate paths. Empty means "wherever certbot puts them for
+# archive_domain", which is the case in every normal deployment — they are
+# overridable only so a certificate from somewhere else can be pointed at
+# without unpicking the derivation.
 variable "tls_cert_path" {
-  description = "Full-chain certificate on the instance, e.g. /etc/letsencrypt/live/archive.thebackroom420.ca/fullchain.pem. Empty serves plaintext, which is only permitted on loopback."
+  description = "Full-chain certificate on the instance. Empty derives the certbot path from archive_domain."
   type        = string
   default     = ""
 }
 
 variable "tls_key_path" {
-  description = "Private key on the instance, e.g. /etc/letsencrypt/live/archive.thebackroom420.ca/privkey.pem."
+  description = "Private key on the instance. Empty derives the certbot path from archive_domain."
   type        = string
   default     = ""
+}
+
+locals {
+  # certbot writes to /etc/letsencrypt/live/<name>/. `live` holds symlinks into
+  # `archive/`, and it is the stable path across renewals — pointing at the
+  # archive/ file directly would pin the config to certN.pem and go stale at
+  # the first renewal.
+  letsencrypt_live = "/etc/letsencrypt/live/${var.archive_domain}"
+
+  tls_cert_path = var.tls_cert_path != "" ? var.tls_cert_path : "${local.letsencrypt_live}/fullchain.pem"
+  tls_key_path  = var.tls_key_path != "" ? var.tls_key_path : "${local.letsencrypt_live}/privkey.pem"
 }
 
 variable "encryption_key" {
@@ -75,8 +115,8 @@ locals {
     database_url   = var.database_url
     s3_endpoint    = "https://s3.${lower(var.storage_region)}.io.cloud.ovh.net"
     encryption_key = var.encryption_key
-    tls_cert_path  = var.tls_cert_path
-    tls_key_path   = var.tls_key_path
+    tls_cert_path  = local.tls_cert_path
+    tls_key_path   = local.tls_key_path
 
     ingest_concurrency       = var.ingest_concurrency
     database_max_connections = var.database_max_connections
