@@ -1,0 +1,16 @@
+# Terraform state contains the S3 secret key in PLAINTEXT.
+# ovh_cloud_project_user_s3_credential generates it, so it is stored in state.
+# Never commit these.
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+.terraform/
+crash.log
+
+# NOTE: .terraform.lock.hcl is deliberately NOT ignored — commit it so provider
+# versions are pinned and applies are reproducible.
+
+# Variable files holding credentials
+secrets.tfvars
+terraform.tfvars
+*.auto.tfvars

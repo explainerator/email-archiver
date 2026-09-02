@@ -1,0 +1,122 @@
+#cloud-config
+# -----------------------------------------------------------------------------
+# Stalwart archive host — first-boot configuration
+# -----------------------------------------------------------------------------
+# Runs via the instance's user_data. Declarative and idempotent, so rebuilding
+# the instance re-configures it identically without SSH provisioners.
+#
+# CRITICAL: the data disk is NEVER reformatted if it already holds a
+# filesystem. The rebuild path (destroy instance, reattach volume, recreate)
+# depends on that guard — reformatting would destroy the RocksDB metadata and
+# FTS index, and the archive would have to be rebuilt from blob storage.
+# -----------------------------------------------------------------------------
+
+package_update: true
+package_upgrade: true
+
+packages:
+  - docker.io
+  - docker-compose-v2
+  - unattended-upgrades
+  - ufw
+  - gzip
+  - curl
+
+write_files:
+  # ---------------------------------------------------------------------------
+  # Data disk preparation.
+  # Identifies the data disk as the first whole disk that is not the root disk,
+  # then formats it ONLY if it has no filesystem. Mounts by LABEL so the mount
+  # survives device renaming (sdb -> vdb etc.) across rebuilds.
+  # ---------------------------------------------------------------------------
+  - path: /usr/local/sbin/prepare-data-disk.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+
+      LABEL="stalwart-data"
+      MOUNTPOINT="/var/lib/stalwart"
+
+      # Already mounted? Nothing to do (idempotent re-runs).
+      if mountpoint -q "$MOUNTPOINT"; then
+        echo "prepare-data-disk: $MOUNTPOINT already mounted"
+        exit 0
+      fi
+
+      # Locate the data disk: the first whole disk that is not the root disk.
+      find_data_disk() {
+        local root_src root_disk d
+        root_src="$(findmnt -no SOURCE /)"
+        root_disk="$(lsblk -no PKNAME "$root_src" 2>/dev/null | head -1 || true)"
+        [ -z "$root_disk" ] && root_disk="$(basename "$root_src")"
+        for d in $(lsblk -dno NAME,TYPE | awk '$2=="disk"{print $1}'); do
+          [ "$d" = "$root_disk" ] && continue
+          echo "/dev/$d"
+          return 0
+        done
+        return 1
+      }
+
+      # Wait for the volume to appear. Terraform attaches it AFTER the instance
+      # is created, so on a first boot cloud-init reaches this point before the
+      # disk exists. Same race on rebuild. Up to 5 minutes.
+      DATA_DISK=""
+      for i in $(seq 1 60); do
+        if DATA_DISK="$(find_data_disk)"; then
+          echo "prepare-data-disk: found $DATA_DISK"
+          break
+        fi
+        echo "prepare-data-disk: waiting for data volume to attach ($i/60)"
+        sleep 5
+      done
+
+      if [ -z "$DATA_DISK" ]; then
+        echo "prepare-data-disk: no data disk after 5 minutes; is the volume attached?" >&2
+        exit 1
+      fi
+
+      if blkid "$DATA_DISK" >/dev/null 2>&1; then
+        # Existing filesystem. This is the rebuild path — never reformat.
+        # Verify it is ours before trusting the mount-by-label below.
+        FOUND_LABEL="$(blkid -o value -s LABEL "$DATA_DISK" || true)"
+        if [ "$FOUND_LABEL" != "$LABEL" ]; then
+          echo "prepare-data-disk: $DATA_DISK holds a filesystem labelled '$FOUND_LABEL', expected '$LABEL'." >&2
+          echo "Refusing to format or mount. Inspect manually." >&2
+          exit 1
+        fi
+        echo "prepare-data-disk: reusing existing filesystem labelled $LABEL"
+      else
+        echo "prepare-data-disk: formatting blank disk $DATA_DISK as ext4"
+        mkfs.ext4 -L "$LABEL" "$DATA_DISK"
+      fi
+
+      mkdir -p "$MOUNTPOINT"
+      if ! grep -q "LABEL=$LABEL" /etc/fstab; then
+        echo "LABEL=$LABEL $MOUNTPOINT ext4 defaults,noatime,nofail 0 2" >> /etc/fstab
+      fi
+      mount "$MOUNTPOINT"
+      echo "prepare-data-disk: mounted $MOUNTPOINT"
+
+  # ---------------------------------------------------------------------------
+  # Unattended security upgrades. Keeps OS patching off the maintenance list.
+  # ---------------------------------------------------------------------------
+  - path: /etc/apt/apt.conf.d/20auto-upgrades
+    content: |
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Unattended-Upgrade "1";
+
+runcmd:
+  - [ /usr/local/sbin/prepare-data-disk.sh ]
+
+  # Firewall. 443 and 993 are opened now so Stalwart's ACME (TLS-ALPN-01 on
+  # 443) and IMAPS work as soon as it is deployed. 25 and 587 stay closed:
+  # this box neither sends nor receives mail, and an archive that cannot send
+  # cannot become a spam relay.
+  - [ ufw, allow, 22/tcp ]
+  - [ ufw, allow, 80/tcp ]
+  - [ ufw, allow, 443/tcp ]
+  - [ ufw, allow, 993/tcp ]
+  - [ ufw, --force, enable ]
+
+  - [ systemctl, enable, --now, docker ]

@@ -1,0 +1,31 @@
+# -----------------------------------------------------------------------------
+# Copy to terraform.tfvars, and put credentials in secrets.tfvars.
+# Both are git-ignored.
+#
+# Apply with:
+#   terraform apply -var-file=secrets.tfvars
+# -----------------------------------------------------------------------------
+
+# --- secrets.tfvars (git-ignored) --------------------------------------------
+# ovh_application_key    = "your-app-key"
+# ovh_application_secret = "your-app-secret"
+# ovh_consumer_key       = "your-consumer-key"
+
+# --- terraform.tfvars --------------------------------------------------------
+
+# OVHcloud Public Cloud project ID
+ovh_project_id = "e3b6f89ee278425690d66d2e8fe39103"
+
+# Blob store. Region is uppercase here; the endpoint output lowercases it.
+# BHS = Beauharnois, Canada — same datacentre as the instance (BHS5).
+storage_region = "BHS"
+
+# Deployment
+ssh_private_key_path = "~/.ssh/id_rsa-ags_dev"
+
+# Archive users: key -> primary email address. Derives one bucket each.
+# Removing an entry fails the plan by design (prevent_destroy in storage.tf).
+users = {
+  # ken  = "ken@twoducks.ca"
+  # marc = "marc@thebackroom420.ca"
+}
