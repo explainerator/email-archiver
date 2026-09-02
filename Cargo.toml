@@ -57,6 +57,12 @@ archive-api-types = { path = "api-types" }
 # archive is served to it over HTTP by the same binary.
 axum = "0.8"
 tower-http = { version = "0.7", features = ["fs", "set-header", "compression-gzip"] }
+# Serving HTTPS means accepting each connection ourselves so it can be wrapped
+# with the reloading certificate, rather than handing the listener to
+# axum::serve. See web::serve_tls.
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["server", "server-auto", "tokio"] }
+tower = "0.5"
 
 [dev-dependencies]
 # Integration tests in tests/ drive async database calls directly.

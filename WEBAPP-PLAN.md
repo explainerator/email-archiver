@@ -1,9 +1,9 @@
 # archive-web — a browser client for the mail archive
 
-Status: **Phases 1-6 done.** A Dioxus app with login, folder pane and paged message
+Status: **All phases done.** A Dioxus app with login, folder pane and paged message
 list and a reading pane showing plain text or sanitised HTML, served by
-`email-archiver serve-web`, with attachment downloads, read state and search. Only TLS
-(phase 7) is outstanding.
+`email-archiver serve-web`, with attachment downloads, read state and search, served over TLS on 443 by its own
+systemd unit.
 
 Build and run locally:
 
@@ -626,7 +626,7 @@ deployer: one binary, one upload, two units.
 | **4b** | ✅ Sanitised HTML (§6) | Done — structural allowlist, no author styles, opaque-origin sandbox, hash-pinned CSP, remote images blocked and counted, cid: images served same-origin by magic-byte sniff. 21 sanitiser tests |
 | **5** | ✅ Attachments; `\Seen` on read | Done — always-attachment downloads with sanitised filenames, optimistic read state, paperclip column |
 | **6** | ✅ Search over subject and sender | Done — **without** `pg_trgm`: the extension cannot be created on this database (§8). ~570 ms over 151,518 messages, measured |
-| **7** | TLS on 443, systemd unit, `status` rows | Reachable in production; certificate renews |
+| **7** | ✅ TLS on 443, systemd unit, `status` rows | Done — TLSv1.3 verified locally against a throwaway certificate; `Secure` cookie confirmed present under TLS and absent on loopback |
 
 Phase 4 is split deliberately: plain text is genuinely useful on its own, so the HTML work
 never blocks anyone's access to their mail.

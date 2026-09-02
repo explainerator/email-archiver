@@ -527,7 +527,7 @@ Refuse. The value here is that it does one thing.
 | **4** | ✅ IMAP spike against Thunderbird | Done — `imap-next` has a real `Server` type; R1 resolved, no `imap-codec` fallback needed |
 | **5** | ✅ LIST, LSUB, SELECT, FETCH · ⬜ STATUS, SEARCH | Thunderbird logs in, browses 47 folders and displays bodies. **ENVELOPE and BODYSTRUCTURE turn out not to be needed** — Thunderbird builds its list from `BODY.PEEK[HEADER.FIELDS (...)]` |
 | **6** | §6.2 rebuild test — drop the schema, reindex from S3 | Identical count, UIDs, structure |
-| **7** | ⬜ certbot, `deploy email-archiver`, **systemd unit running the binary directly** (no Docker) | Running under TLS on the instance. Code complete and statically checked; **not yet run against the instance** |
+| **7** | ✅ certbot, `deploy email-archiver`, **systemd units running the binary directly** (no Docker) | Done — IMAPS live on the instance under a Let's Encrypt certificate; the web client is a second unit on 443 |
 | **8a** | **Google Workspace accounts** — OAuth2 path, small data, *hard deadline* (R3) | Business mail archived before those accounts close |
 | **8b** | Self-hosted `twoducks.ca` ~15 GB, then the remainder | Complete archive |
 

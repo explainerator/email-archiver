@@ -97,17 +97,6 @@ pub async fn run(
         listen::Loopback::AlwaysPlaintext,
     )?;
 
-    if transport.is_tls() {
-        // Phase 7. Deliberately an error rather than a silent downgrade to
-        // plaintext: a web server that quietly stopped using the certificate it
-        // was configured with is precisely the failure this program should
-        // never have.
-        anyhow::bail!(
-            "TLS for the web listener is not implemented yet (WEBAPP-PLAN.md phase 7).\n\
-             Run it on loopback for now: email-archiver serve-web"
-        );
-    }
-
     let state = AppState {
         config: Arc::clone(config),
         pool: pool.clone(),
@@ -124,28 +113,91 @@ pub async fn run(
         .with_context(|| format!("binding {bind}"))?;
 
     match &transport {
+        listen::Transport::Tls(_) => println!("web listening on https://{bind} (TLS)"),
         listen::Transport::Plaintext { loopback: true } => {
             println!("web listening on http://{bind} (plaintext, loopback)")
         }
         listen::Transport::Plaintext { loopback: false } => {
             println!("web listening on http://{bind} (PLAINTEXT, NOT loopback)")
         }
-        listen::Transport::Tls(_) => unreachable!("bailed above"),
     }
     match &assets {
         Some(dir) => println!("  serving assets from {}", dir.display()),
         None => println!("  no frontend built yet; API only. Try /api/health"),
     }
 
-    // ConnectInfo carries the peer address, which the login throttle keys on.
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .await
-    .context("serving HTTP")?;
+    match transport {
+        // ConnectInfo carries the peer address, which the login throttle keys on.
+        listen::Transport::Plaintext { .. } => axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .context("serving HTTP")?,
+        listen::Transport::Tls(reloader) => serve_tls(listener, app, reloader).await?,
+    }
 
     Ok(())
+}
+
+/// Serve HTTPS, accepting each connection so it can be wrapped with whatever
+/// certificate is current.
+///
+/// `axum::serve` takes the whole listener and would fix the certificate at
+/// startup. Asking the reloader per connection is what makes a renewal take
+/// effect without a restart — certbot replaces the file every ninety days and
+/// nothing tells this process about it (see src/tls.rs).
+async fn serve_tls(
+    listener: TcpListener,
+    app: Router,
+    reloader: Arc<crate::tls::CertReloader>,
+) -> Result<()> {
+    loop {
+        // A failed accept must not take down the listener: one bad connection
+        // should not end the service.
+        let (socket, peer) = match listener.accept().await {
+            Ok(pair) => pair,
+            Err(e) => {
+                eprintln!("accept failed: {e}");
+                continue;
+            }
+        };
+
+        let acceptor = reloader.acceptor().await;
+        let app = app.clone();
+
+        tokio::spawn(async move {
+            let stream = match acceptor.accept(socket).await {
+                Ok(stream) => stream,
+                Err(e) => {
+                    // Routine: scanners, health probes and clients that dislike
+                    // our cipher suites all land here. Logged, never fatal.
+                    eprintln!("TLS handshake failed from {peer}: {e}");
+                    return;
+                }
+            };
+
+            // Doing our own accept means axum's connect-info layer is bypassed,
+            // so the peer address has to be inserted by hand. Without it the
+            // login throttle's per-address key would be missing and every
+            // attempt would look like it came from nowhere.
+            let service = hyper::service::service_fn(move |mut request: hyper::Request<_>| {
+                request
+                    .extensions_mut()
+                    .insert(axum::extract::ConnectInfo(peer));
+                let app = app.clone();
+                async move { tower::Service::call(&mut app.clone(), request).await }
+            });
+
+            if let Err(e) =
+                hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new())
+                    .serve_connection(hyper_util::rt::TokioIo::new(stream), service)
+                    .await
+            {
+                eprintln!("connection error from {peer}: {e}");
+            }
+        });
+    }
 }
 
 fn router(state: AppState, assets: Option<PathBuf>) -> Result<Router> {
