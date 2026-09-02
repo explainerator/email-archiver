@@ -7,9 +7,16 @@
 # Contains live S3 secret keys.
 
 [database]
+max_connections = ${database_max_connections}
 # The binary asserts current_database() = "archive" before doing anything, so a
 # wrong value here fails loudly rather than touching the game services' data.
 url = "${database_url}"
+
+[ingest]
+# Messages processed in parallel within one fetched batch. The work is
+# latency-bound (S3 and Postgres round trips), not CPU-bound, so this can
+# exceed the core count. Keep database.max_connections at least this high.
+concurrency = ${ingest_concurrency}
 
 [s3]
 endpoint = "${s3_endpoint}"

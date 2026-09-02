@@ -19,11 +19,6 @@ use sqlx::postgres::PgPoolOptions;
 /// to notice and unpleasant to unpick, so it is asserted before migrating.
 const EXPECTED_DATABASE: &str = "archive";
 
-/// Capped deliberately low. The Postgres cluster is shared with the game
-/// services and we connect as the same `gern` role, so a bulk ingest must not
-/// be able to exhaust the instance's connection budget. See ARCHIVE-PLAN.md R4.
-const MAX_CONNECTIONS: u32 = 3;
-
 const USAGE: &str = "\
 email-archiver
 
@@ -125,7 +120,7 @@ fn arg(args: &[String], index: usize, name: &str) -> Result<String> {
 /// through here so that guard cannot be forgotten by a new subcommand.
 async fn connect_db(config: &Config) -> Result<sqlx::PgPool> {
     let pool = PgPoolOptions::new()
-        .max_connections(MAX_CONNECTIONS)
+        .max_connections(config.database.max_connections)
         .connect(&config.database.url)
         .await
         .context("connecting to Postgres (is this host on the database IP allowlist?)")?;

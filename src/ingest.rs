@@ -13,12 +13,18 @@
 //! database row exists, so a message is never skipped — at worst it is
 //! re-fetched and deduplicated.
 //!
+//! Within a batch, messages are processed concurrently, so the UIDs we assign
+//! are in roughly — not exactly — source order. That is acceptable for an
+//! archive: clients sort by date, and every UID is assigned before any client
+//! sees the folder. It would matter for a live mailbox receiving mail during a
+//! sync, which this is not.
+//!
 //! Resumability is not a nicety here. The largest mailbox is ~15 GB, which is a
 //! multi-day pull that *will* be interrupted.
 
 use anyhow::{Context, Result};
 use chrono::Utc;
-use futures::StreamExt;
+use futures::stream::{self, StreamExt};
 use sqlx::PgPool;
 use std::sync::Arc;
 use tokio::net::TcpStream;
@@ -69,7 +75,8 @@ async fn connect(source: &Source) -> Result<Session> {
 pub async fn run(config: &Config, pool: &PgPool, address: &str) -> Result<()> {
     let account = db::account_by_address(pool, address).await?;
     let source = config.source(address)?;
-    let store = Store::open(config, &account.bucket).await?;
+    // Arc so every concurrent task shares one S3 client and its connection pool.
+    let store = Arc::new(Store::open(config, &account.bucket).await?);
 
     println!("ingesting {address} -> bucket {}", account.bucket);
 
@@ -93,11 +100,23 @@ pub async fn run(config: &Config, pool: &PgPool, address: &str) -> Result<()> {
         names
     };
 
-    println!("  {} selectable folders", folders.len());
+    println!(
+        "  {} selectable folders, concurrency {}",
+        folders.len(),
+        config.ingest.concurrency
+    );
 
     let mut total = 0usize;
     for name in &folders {
-        total += ingest_folder(pool, &store, &mut session, &account, name).await?;
+        total += ingest_folder(
+            pool,
+            &store,
+            &mut session,
+            &account,
+            name,
+            config.ingest.concurrency,
+        )
+        .await?;
     }
 
     session.logout().await.ok();
@@ -107,10 +126,11 @@ pub async fn run(config: &Config, pool: &PgPool, address: &str) -> Result<()> {
 
 async fn ingest_folder(
     pool: &PgPool,
-    store: &Store,
+    store: &Arc<Store>,
     session: &mut Session,
     account: &db::Account,
     name: &str,
+    concurrency: usize,
 ) -> Result<usize> {
     // EXAMINE, not SELECT: read-only on the source. Ingest must never mark the
     // user's live mail as read, or otherwise alter the mailbox it is copying.
@@ -172,12 +192,42 @@ async fn ingest_folder(
             out
         };
 
-        for (source_uid, raw, seen) in fetched {
-            if store_message(pool, store, account, &folder, name, source_uid, &raw, seen).await? {
+        // The IMAP fetch above is necessarily serial — one session, one selected
+        // mailbox — but everything after it is network round trips to S3 and
+        // Postgres, which overlap happily.
+        let outcomes: Vec<Result<bool>> = stream::iter(fetched.into_iter().map(
+            |(source_uid, raw, seen)| {
+                let pool = pool.clone();
+                let store = Arc::clone(store);
+                let account = account.clone();
+                let folder = folder.clone();
+                let name = name.to_string();
+                async move {
+                    store_message(
+                        &pool, &store, &account, &folder, &name, source_uid, &raw, seen,
+                    )
+                    .await
+                }
+            },
+        ))
+        .buffer_unordered(concurrency)
+        .collect()
+        .await;
+
+        for outcome in outcomes {
+            if outcome? {
                 new_messages += 1;
             }
-            db::advance_source_uid(pool, folder.id, source_uid as i64).await?;
         }
+
+        // Advanced once per batch rather than per message: one round trip
+        // instead of hundreds. Safe because it only moves after every message
+        // in the batch has its database row — an interruption re-fetches the
+        // batch, which is idempotent.
+        let batch_max = chunk.iter().copied().max().unwrap_or(0);
+        db::advance_source_uid(pool, folder.id, batch_max as i64).await?;
+
+        println!("    {name}: {new_messages} stored");
     }
 
     Ok(new_messages)

@@ -38,6 +38,8 @@ pub struct Config {
     /// ingested, and says so.
     #[serde(default)]
     pub sources: HashMap<String, Source>,
+    #[serde(default)]
+    pub ingest: Ingest,
 }
 
 /// How to reach one source mailbox.
@@ -59,6 +61,43 @@ fn default_imaps_port() -> u16 {
 #[derive(Deserialize)]
 pub struct Database {
     pub url: String,
+    /// Connection pool ceiling.
+    ///
+    /// This cluster is shared with the game services and we connect as the same
+    /// role, so the pool is a courtesy limit as much as a performance knob.
+    /// Should be at least `ingest.concurrency`, or ingest tasks queue waiting
+    /// for a connection.
+    #[serde(default = "default_max_connections")]
+    pub max_connections: u32,
+}
+
+fn default_max_connections() -> u32 {
+    8
+}
+
+#[derive(Deserialize)]
+pub struct Ingest {
+    /// Messages processed in parallel within one fetched batch.
+    ///
+    /// Each message costs several round trips (S3 put, a few Postgres
+    /// statements, S3 manifest put), and those dominate wall-clock — the work
+    /// is latency-bound, not CPU-bound, so this can exceed the core count.
+    /// Raising it past what the source IMAP server or the database pool will
+    /// take just moves the queue.
+    #[serde(default = "default_concurrency")]
+    pub concurrency: usize,
+}
+
+fn default_concurrency() -> usize {
+    8
+}
+
+impl Default for Ingest {
+    fn default() -> Self {
+        Self {
+            concurrency: default_concurrency(),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -103,6 +142,13 @@ impl Config {
     fn validate(&self) -> Result<()> {
         anyhow::ensure!(!self.database.url.is_empty(), "database.url is empty");
         anyhow::ensure!(!self.s3.endpoint.is_empty(), "s3.endpoint is empty");
+        anyhow::ensure!(self.ingest.concurrency >= 1, "ingest.concurrency must be at least 1");
+        if (self.database.max_connections as usize) < self.ingest.concurrency {
+            eprintln!(
+                "warning: ingest.concurrency ({}) exceeds database.max_connections ({});                  ingest tasks will queue on the connection pool",
+                self.ingest.concurrency, self.database.max_connections
+            );
+        }
         Ok(())
     }
 

@@ -29,6 +29,18 @@ variable "database_url" {
   }
 }
 
+variable "ingest_concurrency" {
+  description = "Messages processed in parallel per fetched batch. Latency-bound work, so this may exceed the core count."
+  type        = number
+  default     = 8
+}
+
+variable "database_max_connections" {
+  description = "Postgres pool ceiling. Shared cluster, so this is a courtesy limit as much as a tuning knob. Keep >= ingest_concurrency."
+  type        = number
+  default     = 8
+}
+
 variable "source_accounts" {
   description = <<-EOT
     How to log in to each SOURCE mailbox being archived, keyed by address.
@@ -61,7 +73,10 @@ locals {
     database_url = var.database_url
     s3_endpoint  = "https://s3.${lower(var.storage_region)}.io.cloud.ovh.net"
     sources      = var.source_accounts
-    s3_region    = lower(var.storage_region)
+
+    ingest_concurrency       = var.ingest_concurrency
+    database_max_connections = var.database_max_connections
+    s3_region                = lower(var.storage_region)
 
     # bucket -> credentials. Keyed by bucket to match how the archiver looks
     # them up (users.bucket in Postgres), not by our internal user key.

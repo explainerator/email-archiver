@@ -231,7 +231,20 @@ pub async fn place_message(
             .fetch_optional(&mut *tx)
             .await?;
     if let Some(uid) = already {
-        tx.rollback().await?;
+        // Backfill source_uid if this row predates the column. Without this a
+        // re-ingest cannot repair it, and the database would stay unable to
+        // reproduce manifests field-for-field. COALESCE so an existing value is
+        // never overwritten.
+        sqlx::query(
+            "UPDATE placements SET source_uid = COALESCE(source_uid, $3)
+             WHERE folder_id = $1 AND uid = $2",
+        )
+        .bind(folder_id)
+        .bind(uid)
+        .bind(source_uid)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
         return Ok((uid, false));
     }
 
