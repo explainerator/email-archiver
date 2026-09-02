@@ -47,7 +47,12 @@ struct Session {
     selected: Option<(i64, String)>,
 }
 
-pub async fn run(config: &Arc<Config>, pool: &PgPool, bind: &str) -> Result<()> {
+pub async fn run(
+    config: &Arc<Config>,
+    pool: &PgPool,
+    bind: &str,
+    allow_plaintext: bool,
+) -> Result<()> {
     let tls = match config.tls.paths()? {
         Some((cert, key)) => Some(Arc::new(CertReloader::new(cert, key)?)),
         None => None,
@@ -57,19 +62,29 @@ pub async fn run(config: &Arc<Config>, pool: &PgPool, bind: &str) -> Result<()> 
     // on anything but loopback would hand every password to whoever is on the
     // path, so that combination is refused rather than warned about.
     if tls.is_none() && !is_loopback(bind) {
-        anyhow::bail!(
+        anyhow::ensure!(
+            allow_plaintext,
             "refusing to serve plaintext on {bind}: IMAP sends passwords in clear text.\n\
-             Either bind 127.0.0.1, or set tls.cert_path and tls.key_path."
+             Set tls.cert_path and tls.key_path, bind 127.0.0.1, or pass --allow-plaintext \
+             to override for local testing."
         );
+        // A flag rather than a config option, deliberately: a config setting
+        // persists and would quietly remain enabled after deployment. This has
+        // to be typed every time.
+        eprintln!(
+            "  WARNING: serving PLAINTEXT on {bind} because --allow-plaintext was given."
+        );
+        eprintln!("  Every IMAP password on this listener crosses the network in clear text.");
     }
 
     let listener = TcpListener::bind(bind)
         .await
         .with_context(|| format!("binding {bind}"))?;
 
-    match &tls {
-        Some(_) => println!("IMAP listening on {bind} (TLS)"),
-        None => println!("IMAP listening on {bind} (PLAINTEXT, loopback only)"),
+    match (&tls, is_loopback(bind)) {
+        (Some(_), _) => println!("IMAP listening on {bind} (TLS)"),
+        (None, true) => println!("IMAP listening on {bind} (plaintext, loopback)"),
+        (None, false) => println!("IMAP listening on {bind} (PLAINTEXT, NOT loopback)"),
     }
     println!("  Passwords verified against users.password_hash.");
 

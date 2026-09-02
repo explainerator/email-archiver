@@ -60,10 +60,12 @@ USAGE:
         Regenerate all S3 manifests for a user from the database. Use when
         manifests are missing, or were written under an older key scheme.
 
-    email-archiver serve [bind]
+    email-archiver serve [bind] [--allow-plaintext]
         Read-only IMAP server. Default 127.0.0.1:1143.
-        Serves TLS when tls.cert_path and tls.key_path are set; refuses to bind
-        a non-loopback address without them, since IMAP LOGIN is plaintext.
+        Serves TLS when tls.cert_path and tls.key_path are set. Loopback may be
+        plaintext; any other address needs TLS, or --allow-plaintext to
+        override for local testing. IMAP LOGIN sends the password in the clear,
+        so that override puts real passwords on the network.
 
     email-archiver backfill-headers <login>
         Cache header blocks for messages archived before that column existed.
@@ -180,10 +182,12 @@ async fn main() -> Result<()> {
         Some("serve") => {
             let bind = args
                 .get(1)
+                .filter(|a| !a.starts_with("--"))
                 .cloned()
                 .unwrap_or_else(|| "127.0.0.1:1143".to_string());
+            let allow_plaintext = args.iter().any(|a| a == "--allow-plaintext");
             let pool = connect_db(&config).await?;
-            server::run(&std::sync::Arc::new(config), &pool, &bind).await
+            server::run(&std::sync::Arc::new(config), &pool, &bind, allow_plaintext).await
         }
 
         Some("backfill-headers") => {
