@@ -164,7 +164,9 @@ async fn ingest_folder(
     if uids.is_empty() {
         return Ok(0);
     }
-    println!("  {name}: {} candidate messages", uids.len());
+    let total = uids.len();
+    println!("  {name}: {total} to fetch");
+    let mut processed = 0usize;
 
     for chunk in uids.chunks(BATCH) {
         let set = chunk
@@ -227,7 +229,11 @@ async fn ingest_folder(
         let batch_max = chunk.iter().copied().max().unwrap_or(0);
         db::advance_source_uid(pool, folder.id, batch_max as i64).await?;
 
-        println!("    {name}: {new_messages} stored");
+        // Progress, not a summary: a large mailbox is many batches and this is
+        // the only sign of life during a long run. Counts are cumulative for
+        // the folder, so the last line doubles as the folder's total.
+        processed += chunk.len();
+        println!("    {name}: {processed}/{total} fetched, {new_messages} new");
     }
 
     Ok(new_messages)
