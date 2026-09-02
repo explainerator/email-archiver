@@ -460,6 +460,105 @@ pub async fn authenticate(
     })
 }
 
+/// Every folder the user can see, with message and unread counts.
+///
+/// Scoped by `accounts.user_id`, so a user cannot see another's folders even if
+/// they guess ids. That scoping is in the SQL rather than in the handler
+/// deliberately -- see WEBAPP-PLAN.md 4.4.
+///
+/// The counts are computed rather than cached. `placements` is keyed
+/// `(folder_id, uid)`, so grouping by folder walks that index; if this ever
+/// becomes slow at real volume, a cached count is a schema change to make with
+/// evidence, not in advance.
+pub async fn folders_for_user(
+    pool: &PgPool,
+    user_id: i64,
+) -> Result<Vec<(i64, String, String, Option<String>, i64, i64)>> {
+    let rows: Vec<(i64, String, String, Option<String>, i64, i64)> = sqlx::query_as(
+        "SELECT f.id,
+                a.label,
+                f.name,
+                a.hierarchy_delimiter,
+                COUNT(p.uid),
+                COUNT(p.uid) FILTER (WHERE NOT p.seen)
+           FROM folders f
+           JOIN accounts a ON a.id = f.account_id
+           LEFT JOIN placements p ON p.folder_id = f.id
+          WHERE a.user_id = $1
+          GROUP BY f.id, a.label, f.name, a.hierarchy_delimiter
+          ORDER BY a.label, f.name",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows)
+}
+
+/// One page of a folder, newest first.
+///
+/// **Keyset pagination.** `cursor` is the `(internaldate, uid)` of the last row
+/// already seen; rows strictly before it come next. `OFFSET` would re-walk
+/// every skipped row, which at 53,000 messages makes late pages progressively
+/// slower for no reason.
+///
+/// The `user_id` bind is what stops a guessed `folder_id` from reading someone
+/// else's mail: the join to `accounts` makes ownership part of the query rather
+/// than a check a handler might forget.
+pub async fn messages_page(
+    pool: &PgPool,
+    user_id: i64,
+    folder_id: i64,
+    cursor: Option<(chrono::DateTime<chrono::Utc>, i64)>,
+    limit: i64,
+) -> Result<Vec<MessageRow>> {
+    let (before_date, before_uid) = match cursor {
+        Some((d, u)) => (Some(d), Some(u)),
+        None => (None, None),
+    };
+
+    let rows: Vec<MessageRow> = sqlx::query_as(
+        "SELECT p.uid,
+                p.seen,
+                m.blake3,
+                m.subject,
+                m.from_addr,
+                m.internaldate,
+                m.size
+           FROM placements p
+           JOIN messages m ON m.id = p.message_id
+           JOIN folders  f ON f.id = p.folder_id
+           JOIN accounts a ON a.id = f.account_id
+          WHERE a.user_id = $1
+            AND p.folder_id = $2
+            AND ($3::timestamptz IS NULL
+                 OR (m.internaldate, p.uid) < ($3, $4))
+          ORDER BY m.internaldate DESC, p.uid DESC
+          LIMIT $5",
+    )
+    .bind(user_id)
+    .bind(folder_id)
+    .bind(before_date)
+    .bind(before_uid)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows)
+}
+
+/// A row of the message list. Ordering matches the SELECT above.
+#[derive(sqlx::FromRow)]
+pub struct MessageRow {
+    pub uid: i64,
+    pub seen: bool,
+    pub blake3: String,
+    pub subject: Option<String>,
+    pub from_addr: Option<String>,
+    pub internaldate: chrono::DateTime<chrono::Utc>,
+    pub size: i64,
+}
+
 /// One user by id, for the web session endpoint.
 ///
 /// Separate from `authenticate` because the caller already holds a verified

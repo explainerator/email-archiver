@@ -1,0 +1,83 @@
+/* Deliberately plain. Three panes, readable text, no framework. */
+:root {
+  --bg: #ffffff; --fg: #1a1a1a; --muted: #6b6b6b;
+  --line: #e0e0e0; --accent: #1e5aa8; --error: #b3261e;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #16181c; --fg: #e6e6e6; --muted: #9aa0a6;
+    --line: #2c2f36; --accent: #7aa7e6; --error: #f2b8b5;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--fg);
+  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+.centre { display: grid; place-items: center; min-height: 100vh; padding: 1rem; }
+.muted { color: var(--muted); }
+.pad { padding: 1rem; }
+.error { color: var(--error); }
+
+.card {
+  display: flex; flex-direction: column; gap: .5rem;
+  width: min(22rem, 100%); padding: 1.5rem;
+  border: 1px solid var(--line); border-radius: 8px;
+}
+.card h1 { margin: 0 0 .5rem; font-size: 1.15rem; }
+.card label { font-size: .8rem; color: var(--muted); }
+.card input {
+  padding: .5rem; border: 1px solid var(--line); border-radius: 4px;
+  background: var(--bg); color: var(--fg); font: inherit;
+}
+.card button {
+  margin-top: .75rem; padding: .55rem; border: 0; border-radius: 4px;
+  background: var(--accent); color: #fff; font: inherit; cursor: pointer;
+}
+.card button:disabled { opacity: .6; cursor: default; }
+
+.shell { display: flex; flex-direction: column; height: 100vh; }
+.shell header {
+  display: flex; align-items: center; gap: 1rem;
+  padding: .6rem 1rem; border-bottom: 1px solid var(--line);
+}
+.shell header .link {
+  margin-left: auto; border: 0; background: none;
+  color: var(--accent); font: inherit; cursor: pointer;
+}
+
+/* Fixed folder and list widths, reader takes the rest. */
+.panes { display: grid; grid-template-columns: 16rem 24rem 1fr; flex: 1; min-height: 0; }
+.panes > * { overflow-y: auto; min-width: 0; }
+.folders { border-right: 1px solid var(--line); padding: .5rem; }
+.list { border-right: 1px solid var(--line); }
+
+.folder {
+  display: flex; width: 100%; gap: .5rem; align-items: center;
+  padding: .35rem .5rem; border: 0; border-radius: 4px;
+  background: none; color: inherit; font: inherit;
+  text-align: left; cursor: pointer;
+}
+.folder:hover { background: color-mix(in srgb, var(--fg) 7%, transparent); }
+.folder.chosen { background: color-mix(in srgb, var(--accent) 18%, transparent); }
+.folder .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.folder .badge { margin-left: auto; font-size: .75rem; color: var(--muted); }
+
+.list-head {
+  display: flex; justify-content: space-between; gap: 1rem;
+  padding: .6rem 1rem; border-bottom: 1px solid var(--line);
+  position: sticky; top: 0; background: var(--bg);
+}
+.list table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+.list td {
+  padding: .4rem .6rem; border-bottom: 1px solid var(--line);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.list .from { width: 34%; color: var(--muted); }
+.list .date { width: 6.5rem; color: var(--muted); text-align: right; }
+.list tr.unseen td { font-weight: 600; color: var(--fg); }
+.more {
+  display: block; width: calc(100% - 2rem); margin: 1rem;
+  padding: .5rem; border: 1px solid var(--line); border-radius: 4px;
+  background: none; color: inherit; font: inherit; cursor: pointer;
+}

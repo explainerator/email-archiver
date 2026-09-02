@@ -9,3 +9,6 @@ config.toml
 
 # Ingest logs contain subjects, addresses and folder names
 *.log
+
+# Frontend build output. `dx` puts the wasm bundle under the crate's own target/.
+web-ui/target/

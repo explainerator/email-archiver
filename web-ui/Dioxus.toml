@@ -1,0 +1,15 @@
+[application]
+name = "archive-web-ui"
+
+[web.app]
+title = "Mail Archive"
+
+[web.watcher]
+# Requests the dev server cannot serve locally are forwarded to the API, so the
+# app is same-origin in development exactly as it is in production. That keeps
+# SameSite=Lax cookies working and means no CORS policy has to exist at all --
+# see WEBAPP-PLAN.md 9.2.
+index_on_404 = true
+
+[[web.proxy]]
+backend = "http://127.0.0.1:8000/api"

@@ -1,7 +1,22 @@
 # archive-web — a browser client for the mail archive
 
-Status: **Phases 1-2 done** (listener, health, static hosting, authentication);
-phases 3-7 outstanding.
+Status: **Phases 1-3 done.** A Dioxus app with login, folder pane and paged message
+list, served by `email-archiver serve-web`. Reading pane, attachments, search and TLS
+(phases 4-7) outstanding.
+
+Build and run locally:
+
+```
+cd web-ui && dx build --platform web --release
+email-archiver serve-web --assets web-ui/target/dx/archive-web-ui/release/web/public
+```
+
+Then <http://127.0.0.1:8000>. **Use `--release` for anything reachable by another person:**
+the debug bundle carries Dioxus's devtools shell, which `@import`s a Google font — an
+external request on every page load, which both breaks the phase 4b CSP and leaks the
+reader's IP and visit to a third party. That would be an odd thing to allow in an app that
+blocks remote images as tracking pixels. The release bundle has no external references at
+all.
 Companion to `ARCHIVE-PLAN.md`, which stays the authority on storage, ingest and IMAP.
 
 ---
@@ -187,9 +202,29 @@ Sort by `internaldate` descending. **Keyset pagination, not `OFFSET`**: the main
 `(internaldate, uid) < (last_date, last_uid)`.
 
 There is no index on `(folder_id, internaldate)`; one would require denormalising
-`internaldate` into `placements`, since an index cannot span a join. **Measure first.**
-Sorting 53,000 rows may well be tens of milliseconds, and a denormalised column that has
-to be kept correct is not free.
+`internaldate` into `placements`, since an index cannot span a join. The plan was to
+measure before adding it, and **the measurement says do not bother.**
+
+Measured against the live archive from a development machine, on the real 53,573-message
+INBOX:
+
+| | Wall clock | Minus baseline |
+|---|---|---|
+| Baseline round trip (`SELECT 1`) | 128 ms | — |
+| Message page (51 rows) | ~180 ms | **~50 ms** |
+| Same query at page 40 (~2,000 deep) | ~180 ms | ~50 ms |
+| Folder list, 46 folders with counts | 467 ms | ~340 ms |
+
+Two things worth reading off that. **Page depth costs nothing** — page 40 is
+indistinguishable from page 1, which is the keyset scheme doing its job; with `OFFSET`
+this row would climb steadily. And most of the wall clock is WAN latency to OVH, not
+query time: from the instance, in the same datacentre, the baseline is a fraction of a
+millisecond, so these become roughly their right-hand column.
+
+**The folder list is the slow query, not the message list** — the opposite of what was
+anticipated. It counts every placement across every folder. At once per app load that is
+tolerable, and it is recorded here rather than optimised because the fix (cached counts,
+or dropping `total` and keeping only `unread`) should be chosen against a real complaint.
 
 ### 5.3 Reading pane
 
@@ -528,7 +563,7 @@ deployer: one binary, one upload, two units.
 |---|---|---|
 | **1** | ✅ `serve-web`: axum, static assets, `127.0.0.1:8000` plaintext | Done — `/api/health` reports database reachability; unknown API routes 404 rather than returning index.html; non-loopback plaintext refused; IMAP unaffected (35 tests) |
 | **2** | ✅ Login, session cookie, `UserScope`, login throttle | Done — `/api/session` 401s without a valid cookie; forged and expired cookies rejected; unknown-user and wrong-password responses byte-identical; throttle engages on the 10th failure |
-| **3** | Folder pane + message list, keyset pagination | Browse the 53k INBOX without a slow page |
+| **3** | ✅ Folder pane + message list, keyset pagination | Done — Dioxus 0.7 app served by the binary; keyset paging flat with depth (§5.2), no index needed |
 | **4a** | Reading pane, **plain text only** | Message bodies readable |
 | **4b** | Sanitised HTML (§6) | A known-hostile message renders inert |
 | **5** | Attachments; `\Seen` on read | Download works; read state agrees with Thunderbird |

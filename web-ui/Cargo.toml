@@ -1,0 +1,14 @@
+[package]
+name = "archive-web-ui"
+version = "0.1.0"
+edition = "2021"
+description = "Browser client for the email archive"
+license = "MIT"
+
+[dependencies]
+# Pinned deliberately. Dioxus APIs have moved between releases and this is a
+# program that should sit untouched for long stretches; see WEBAPP-PLAN.md W6.
+dioxus = { version = "0.7", features = ["web"] }
+archive-api-types = { path = "../api-types" }
+gloo-net = { version = "0.6", features = ["http"] }
+serde = { version = "1", features = ["derive"] }

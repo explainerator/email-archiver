@@ -1,0 +1,9 @@
+[package]
+name = "archive-api-types"
+version = "0.1.0"
+edition = "2021"
+description = "Request and response types shared by the archive HTTP API and its web client"
+license = "MIT"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }

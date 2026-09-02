@@ -2,6 +2,9 @@
 name = "email-archiver"
 version = "0.1.0"
 edition = "2021"
+# Sibling crates with their own manifests. api-types is a path dependency below;
+# web-ui is built by `dx`, not cargo, and must not be swept into this package.
+exclude = ["api-types", "web-ui"]
 description = "Read-only email archive: S3 blob storage, Postgres index, IMAPS for clients"
 license = "MIT"
 
@@ -34,6 +37,9 @@ argon2 = { version = "0.5", features = ["std"] }
 chacha20poly1305 = "0.10"
 rand = "0.8"
 rustls-pemfile = "2.2.0"
+# JSON contract shared with the web client, so a renamed field breaks the build
+# on whichever side has not caught up rather than at runtime.
+archive-api-types = { path = "api-types" }
 
 # Web client backend (WEBAPP-PLAN.md). The browser cannot speak IMAP, so the
 # archive is served to it over HTTP by the same binary.
