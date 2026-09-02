@@ -1,6 +1,7 @@
 # email-archiver — Design Plan
 
-**Status:** DRAFT. Supersedes the Stalwart plan entirely (deleted; recoverable at `5e7c9aa`).
+**Status:** DRAFT. Supersedes an earlier Stalwart-based plan, which was abandoned and is not
+in this repository's history (the repo was re-initialised).
 **Repo:** `email-archiver` — Terraform and the Rust program both live here.
 **Last revised:** 2026-09-01
 
@@ -61,7 +62,7 @@ S3 as primary store, IMAP to clients — are exactly what that category declined
      OVH Managed Postgres          OVH S3 Standard — one bucket per user
      qw300972-001.ca.clouddb       ken-twoducks-ca
      .ovh.net:35628                art-jduck-ca   ...
-     schema: archive               (both in Canada, same region)
+     database: archive             (both in Canada, same region)
 ```
 
 One binary. No local state worth keeping — see §4.
@@ -183,15 +184,29 @@ Rust. Crate choices, with what each removes from scope:
 
 ### 3.1 Postgres
 
-Shared OVH Managed Postgres instance, **isolated in its own schema**:
+Shared OVH Managed Postgres cluster, **isolated in its own database**:
 
 ```
 host      qw300972-001.ca.clouddb.ovh.net
 port      35628
-database  defaultdb
-schema    archive          <- ours; nothing else touches it
+database  archive          <- ours; siblings are defaultdb (game services) and backroom
+user      gern
 sslmode   require
 ```
+
+This is stronger than the schema-in-`defaultdb` arrangement originally planned: the game
+services' tables are not in an adjacent namespace, they are in a different database.
+
+`gern` cannot `CREATE` on the database itself, but **can create tables in `public` within
+`archive`** — verified against the live cluster — so there is **no privileged bootstrap
+step**. Applying the schema is:
+
+```
+DATABASE_URL="postgres://gern:PASSWORD@qw300972-001.ca.clouddb.ovh.net:35628/archive?sslmode=require"   cargo run
+```
+
+The binary asserts `current_database() = 'archive'` before migrating, so a misconfigured
+URL cannot write into `defaultdb`.
 
 ```sql
 users      (id, login, bucket, display_name)      -- one person; owns one S3 bucket
@@ -215,15 +230,12 @@ regenerated, so a rebuild reproduces them exactly. If UIDs shifted, every client
 silently re-download everything.
 
 **Role: reuse `gern`** rather than creating a dedicated one — deliberate, to avoid managing
-another credential. The consequence, recorded honestly: the archiver connects with the same
-privileges as `database-service`, so schema separation is a *convention* here, not a
-permission boundary. Discipline that keeps it honest:
+another credential. Because the archive now has its own *database*, this costs less isolation
+than it would have under the shared-schema plan: `gern` can still reach `defaultdb`, but
+nothing here writes there, and the `current_database()` assertion enforces that.
 
-- every statement targets `archive.*` explicitly; never rely on `search_path`
-- the connection pool is capped low (2–3) so a bulk ingest cannot starve the game services
-  of connections on the shared instance (R4)
-
-**`51.79.93.209` must be added to the database's IP allowlist**, or nothing connects.
+The connection pool is capped at 3 so a bulk ingest cannot starve the game services of
+connections on the shared cluster (R4).
 
 ### 3.2 IMAP subset — target Thunderbird
 
@@ -279,9 +291,9 @@ Built into the binary (`email-archiver ingest --account …`), not a separate to
 
 #### Source account inventory
 
-Recovered from the deleted `EMAIL-MIGRATION.md` (`git show bd23551:EMAIL-MIGRATION.md`),
-which is otherwise superseded. This is the part that drives ingest, because the provider
-determines the authentication method:
+Carried over from a superseded migration document that is no longer in this repository. This
+is the part that drives ingest, because the provider determines the authentication method —
+**it is now recorded only here, so do not delete it lightly:**
 
 | Domain(s) | Provider | Auth for ingest | Real mailboxes |
 |---|---|---|---|
@@ -348,7 +360,9 @@ the lifecycle block, second removes the resource.
 
 Terraform files retained: `instance.tf`, `storage.tf`, `providers.tf`, `variables.tf`,
 `outputs.tf`, `files/cloud-init.yaml`. A `deploy.tf` will be needed again for the new
-program; the Stalwart one is at `5e7c9aa` for reference.
+program. The abandoned Stalwart deployment used an SSH provisioner chain
+(`firewall -> docker_install -> transfer_files -> start`); that shape is still the model to
+follow, but it is not recoverable from this repository.
 
 ---
 
@@ -368,8 +382,9 @@ threshold, SHA-256 recorded, then restart container → restart Docker → reboo
 all. Sized at 200 rather than thousands because the failure mode (ack-before-durable) is
 systematic, not statistical. Cost: cents — OVH bills no requests and no egress.
 
-**6.2 Rebuild-from-S3.** Drop the `archive` schema entirely, re-run the indexer against the
-bucket, confirm identical message count, identical UIDs, identical folder structure.
+**6.2 Rebuild-from-S3.** Truncate every table in the `archive` database, re-run the indexer
+against the buckets, confirm identical message count, identical UIDs, identical folder
+structure.
 **This is the headline test.** Because rebuild is the normal indexing path (§2.2) it should
 pass trivially — and if it doesn't, that is a design defect, not a recovery inconvenience.
 
@@ -417,8 +432,8 @@ Refuse. The value here is that it does one thing.
 
 | Phase | Work | Gate |
 |---|---|---|
-| **0** | Remove the volume (§4.1). Replace the single bucket with per-user buckets (§2.2). Allowlist `51.79.93.209` on the database. Settle Q1–Q3. | DB reachable; one bucket + credential per user |
-| **1** | `archive` schema + sqlx migrations | `sqlx migrate run` clean |
+| **0** | ✅ Volume removed. Per-user buckets created. DB allowlist updated. Q1–Q3 settled. | Done |
+| **1** | ✅ `archive` database + sqlx migrations | Done — 5 tables, all FKs RESTRICT, constraints verified against the live database |
 | **2** | S3 write/read + manifest format; §6.1 durability check | 200 objects byte-identical |
 | **3** | Ingest one *small generic-IMAP* account end to end (`kenduck.ca` / `jduck.ca`) | Objects in S3, rows in Postgres |
 | **4** | **IMAP spike: `SELECT` + `FETCH` only, against Thunderbird** | **Thunderbird lists and opens a message. If this fails, revisit R1 before going further.** |

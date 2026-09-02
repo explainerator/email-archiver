@@ -1,0 +1,5 @@
+/target
+**/*.rs.bk
+
+# DATABASE_URL contains the Postgres password
+.env

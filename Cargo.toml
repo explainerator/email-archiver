@@ -1,0 +1,18 @@
+[package]
+name = "email-archiver"
+version = "0.1.0"
+edition = "2021"
+description = "Read-only email archive: S3 blob storage, Postgres index, IMAPS for clients"
+license = "MIT"
+
+[dependencies]
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio-rustls",
+    "postgres",
+    "chrono",
+    "json",
+    "migrate",
+    "macros",
+] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+anyhow = "1"
