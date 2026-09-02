@@ -143,6 +143,14 @@ manifest/<account>/<uuid>.json            sidecar: account, folder, internaldate
 yields everything needed to reconstruct that user's rows in Postgres without parsing GB of
 message bodies.
 
+**Duplicates within a folder collapse into one message — decided, keep it.**
+Two byte-identical messages in the same folder share a placement, so the folder
+shows one copy where the source had two. Verified in practice: 18 such cases
+across ~14,000 messages in three folders, all confirmed duplicates rather than
+loss. Two identical messages are indistinguishable in a client, so the second is
+noise. Use `diagnose` to tell duplicates from real loss; ingest's completeness
+note points at it rather than claiming loss it cannot demonstrate.
+
 **Deduplication is per-user, deliberately.** Content-addressing means a message that arrived
 in two of *one user's* accounts is stored once. A message shared between *two different
 users* is stored twice — once in each bucket. That is the correct trade: cross-user dedup
@@ -449,8 +457,8 @@ Refuse. The value here is that it does one thing.
 | **1** | ✅ `archive` database + sqlx migrations | Done — 5 tables, all FKs RESTRICT, constraints verified against the live database |
 | **2** | ✅ S3 write/read + manifest format | Done — content-addressed put/get with read-time hash verification, paginated listing, version-aware delete |
 | **3** | Ingest one *small generic-IMAP* account end to end (`kenduck.ca` / `jduck.ca`) | Objects in S3, rows in Postgres |
-| **4** | **IMAP spike: `SELECT` + `FETCH` only, against Thunderbird** | **Thunderbird lists and opens a message. If this fails, revisit R1 before going further.** |
-| **5** | Remaining subset: LIST, STATUS, SEARCH (metadata), IDLE | Thunderbird fully usable |
+| **4** | ✅ IMAP spike against Thunderbird | Done — `imap-next` has a real `Server` type; R1 resolved, no `imap-codec` fallback needed |
+| **5** | ✅ LIST, LSUB, SELECT, FETCH · ⬜ STATUS, SEARCH | Thunderbird logs in, browses 47 folders and displays bodies. **ENVELOPE and BODYSTRUCTURE turn out not to be needed** — Thunderbird builds its list from `BODY.PEEK[HEADER.FIELDS (...)]` |
 | **6** | §6.2 rebuild test — drop the schema, reindex from S3 | Identical count, UIDs, structure |
 | **7** | ACME, `deploy.tf`, **systemd unit running the binary directly** (no Docker) | Running under TLS on the instance |
 | **8a** | **Google Workspace accounts** — OAuth2 path, small data, *hard deadline* (R3) | Business mail archived before those accounts close |
