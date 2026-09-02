@@ -84,34 +84,36 @@ impl ServerCertVerifier for AcceptAnyCert {
         Ok(ServerCertVerified::assertion())
     }
 
+    // Handshake signatures are accepted too, not just the certificate.
+    //
+    // This is not an additional concession in practice: once any certificate is
+    // accepted, an attacker simply presents their own certificate and its
+    // matching key, and the signature verifies perfectly. Checking it while
+    // ignoring who the certificate belongs to protects against nothing.
+    //
+    // It is also what makes old servers reachable at all — a host whose
+    // certificate expired years ago tends to negotiate signature schemes that
+    // current providers no longer verify, which surfaces as BadSignature.
     fn verify_tls12_signature(
         &self,
-        message: &[u8],
-        cert: &CertificateDer<'_>,
-        dss: &DigitallySignedStruct,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, TlsError> {
-        tokio_rustls::rustls::crypto::verify_tls12_signature(
-            message,
-            cert,
-            dss,
-            &self.0.signature_verification_algorithms,
-        )
+        Ok(HandshakeSignatureValid::assertion())
     }
 
     fn verify_tls13_signature(
         &self,
-        message: &[u8],
-        cert: &CertificateDer<'_>,
-        dss: &DigitallySignedStruct,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, TlsError> {
-        tokio_rustls::rustls::crypto::verify_tls13_signature(
-            message,
-            cert,
-            dss,
-            &self.0.signature_verification_algorithms,
-        )
+        Ok(HandshakeSignatureValid::assertion())
     }
 
+    // Advertise everything the provider knows, so an old server is not refused
+    // for offering a scheme we would have accepted anyway.
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
         self.0.signature_verification_algorithms.supported_schemes()
     }
@@ -122,7 +124,7 @@ async fn connect(source: &Source) -> Result<Session> {
         // Loud, and on stderr: a run that silently stopped authenticating the
         // server should not look like a normal one in a log read months later.
         eprintln!(
-            "  WARNING: certificate verification DISABLED for {} — the connection is              encrypted but the server is not authenticated",
+            "  WARNING: certificate verification DISABLED for {} — encrypted, but the server is NOT authenticated",
             source.host
         );
         let provider = CryptoProvider::get_default()

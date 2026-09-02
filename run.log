@@ -1,0 +1,5 @@
+ingesting kduck@twoducks.ca -> bucket ken-twoducks-ca
+Error: TLS handshake failed
+
+Caused by:
+    invalid peer certificate: certificate expired: verification time 1788324884 (UNIX), but certificate is not valid after 1643936927 (144387957 seconds ago)
