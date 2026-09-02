@@ -27,7 +27,8 @@ email-archiver
 
 USAGE:
     email-archiver migrate
-        Apply database migrations to the `archive` database.
+        Show the current schema. Migrations run automatically on every
+        command, so this is a report rather than a required step.
 
     email-archiver add-user <login> <bucket> [display name]
         Register an archive user and the S3 bucket they own.
@@ -142,10 +143,18 @@ fn arg(args: &[String], index: usize, name: &str) -> Result<String> {
         .with_context(|| format!("missing argument <{name}>\n\n{USAGE}"))
 }
 
-/// Connect, and refuse to proceed unless this really is the archive database.
+/// Connect, verify this is the archive database, and bring the schema up to date.
 ///
-/// The cluster also hosts the game services' `defaultdb`. Every command goes
-/// through here so that guard cannot be forgotten by a new subcommand.
+/// Migrations run here rather than in a separate command, so the schema can
+/// never lag the binary. A manual step is a step that gets skipped — or worse,
+/// run with a stale binary, which silently applies only the migrations that
+/// existed when *it* was built and reports success.
+///
+/// sqlx takes an advisory lock while migrating, so concurrent starts are safe.
+///
+/// The database guard lives here too: the cluster also hosts the game services'
+/// `defaultdb`, and every command goes through this function so neither check
+/// can be forgotten by a new subcommand.
 async fn connect_db(config: &Config) -> Result<sqlx::PgPool> {
     let pool = PgPoolOptions::new()
         .max_connections(config.database.max_connections)
@@ -161,18 +170,21 @@ async fn connect_db(config: &Config) -> Result<sqlx::PgPool> {
         "connected to database {database:?}, expected {EXPECTED_DATABASE:?}. \
          Refusing to continue — this cluster also hosts the game services' `defaultdb`."
     );
-    Ok(pool)
-}
-
-async fn migrate(config: &Config) -> Result<()> {
-    println!("loaded {config:?}");
-    let pool = connect_db(config).await?;
-    let database = EXPECTED_DATABASE;
 
     sqlx::migrate!("./migrations")
         .run(&pool)
         .await
         .context("applying migrations")?;
+
+    Ok(pool)
+}
+
+/// Report the schema. Migrations have already run in `connect_db`; this exists
+/// to show what is there, not to be the thing that applies them.
+async fn migrate(config: &Config) -> Result<()> {
+    println!("loaded {config:?}");
+    let pool = connect_db(config).await?;
+    let database = EXPECTED_DATABASE;
 
     let tables: Vec<String> = sqlx::query_scalar(
         "SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename",
