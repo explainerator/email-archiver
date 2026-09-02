@@ -9,7 +9,7 @@
 
 mod api;
 
-use archive_api_types::{Folder, Identity, MessageSummary};
+use archive_api_types::{Folder, Identity, Mailbox, MessageDetail, MessageSummary};
 use dioxus::prelude::*;
 
 const CSS: Asset = asset!("/assets/main.css");
@@ -115,6 +115,7 @@ fn Login(auth: Signal<Auth>) -> Element {
 fn Shell(identity: Identity, auth: Signal<Auth>) -> Element {
     let folders = use_resource(api::folders);
     let mut selected = use_signal(|| None::<Folder>);
+    let mut open = use_signal(|| None::<String>);
 
     let sign_out = move |_| async move {
         let _ = api::logout().await;
@@ -139,7 +140,7 @@ fn Shell(identity: Identity, auth: Signal<Auth>) -> Element {
                                     key: "{folder.id}",
                                     folder: folder.clone(),
                                     selected: selected().map(|f| f.id) == Some(folder.id),
-                                    onselect: move |f| selected.set(Some(f)),
+                                    onselect: move |f| { selected.set(Some(f)); open.set(None); },
                                 }
                             }
                         },
@@ -148,11 +149,21 @@ fn Shell(identity: Identity, auth: Signal<Auth>) -> Element {
                 section { class: "list",
                     match selected() {
                         None => rsx! { p { class: "muted pad", "Select a folder." } },
-                        Some(folder) => rsx! { MessageList { key: "{folder.id}", folder } },
+                        Some(folder) => rsx! {
+                            MessageList {
+                                key: "{folder.id}",
+                                folder,
+                                opened: open(),
+                                onopen: move |hash| open.set(Some(hash)),
+                            }
+                        },
                     }
                 }
                 section { class: "reader",
-                    p { class: "muted pad", "Select a message." }
+                    match open() {
+                        None => rsx! { p { class: "muted pad", "Select a message." } },
+                        Some(hash) => rsx! { Reader { key: "{hash}", blake3: hash } },
+                    }
                 }
             }
         }
@@ -175,7 +186,7 @@ fn FolderRow(folder: Folder, selected: bool, onselect: EventHandler<Folder>) -> 
 }
 
 #[component]
-fn MessageList(folder: Folder) -> Element {
+fn MessageList(folder: Folder, opened: Option<String>, onopen: EventHandler<String>) -> Element {
     let mut messages = use_signal(Vec::<MessageSummary>::new);
     let mut next = use_signal(|| None::<String>);
     let mut error = use_signal(|| None::<String>);
@@ -225,7 +236,17 @@ fn MessageList(folder: Folder) -> Element {
         table {
             tbody {
                 for message in messages() {
-                    tr { key: "{message.uid}", class: if message.seen { "" } else { "unseen" },
+                    tr {
+                        key: "{message.uid}",
+                        class: match (opened.as_deref() == Some(message.blake3.as_str()), message.seen) {
+                            (true, _) => "open",
+                            (false, false) => "unseen",
+                            (false, true) => "",
+                        },
+                        onclick: {
+                            let hash = message.blake3.clone();
+                            move |_| onopen.call(hash.clone())
+                        },
                         td { class: "from", "{message.from.clone().unwrap_or_default()}" }
                         td { class: "subject",
                             "{message.subject.clone().unwrap_or_else(|| String::from(\"(no subject)\"))}"
@@ -252,4 +273,99 @@ fn MessageList(folder: Folder) -> Element {
 /// prefix would be a poor trade.
 fn short_date(rfc3339: &str) -> &str {
     rfc3339.split('T').next().unwrap_or(rfc3339)
+}
+
+#[component]
+fn Reader(blake3: String) -> Element {
+    let detail = use_resource(move || {
+        let blake3 = blake3.clone();
+        async move { api::message(&blake3).await }
+    });
+
+    rsx! {
+        match &*detail.read_unchecked() {
+            None => rsx! { p { class: "muted pad", "Loading…" } },
+            Some(Err(e)) => rsx! { p { class: "error pad", "{e.message()}" } },
+            Some(Ok(message)) => rsx! { MessageView { message: message.clone() } },
+        }
+    }
+}
+
+#[component]
+fn MessageView(message: MessageDetail) -> Element {
+    rsx! {
+        article { class: "message",
+            header {
+                h2 { "{message.subject.clone().unwrap_or_else(|| String::from(\"(no subject)\"))}" }
+                dl {
+                    dt { "From" }
+                    dd { "{addresses(&message.from)}" }
+                    if !message.to.is_empty() {
+                        dt { "To" }
+                        dd { "{addresses(&message.to)}" }
+                    }
+                    if !message.cc.is_empty() {
+                        dt { "Cc" }
+                        dd { "{addresses(&message.cc)}" }
+                    }
+                    dt { "Date" }
+                    dd { "{message.date}" }
+                }
+            }
+
+            if !message.parts.is_empty() {
+                ul { class: "parts",
+                    for part in message.parts.iter() {
+                        li { key: "{part.index}",
+                            // Not links yet: the download endpoint is phase 5.
+                            // Listing them is still worth doing -- knowing an
+                            // attachment exists is most of the value.
+                            span { "{part.filename.clone().unwrap_or_else(|| String::from(\"(unnamed)\"))}" }
+                            span { class: "muted", " {part.content_type} · {kilobytes(part.size)}" }
+                        }
+                    }
+                }
+            }
+
+            match &message.text {
+                Some(text) => rsx! { pre { class: "body", "{text}" } },
+                None if message.has_html => rsx! {
+                    p { class: "muted pad",
+                        "This message has no plain-text version. Rendering HTML safely is still to come."
+                    }
+                },
+                None => rsx! { p { class: "muted pad", "This message has no readable body." } },
+            }
+
+            if message.text.is_some() && message.has_html {
+                p { class: "muted pad note",
+                    "Showing the plain-text version. An HTML version exists."
+                }
+            }
+        }
+    }
+}
+
+/// `Name <addr>` per mailbox, comma separated. Falls back to whichever half is
+/// present, since either can be missing.
+fn addresses(list: &[Mailbox]) -> String {
+    list.iter()
+        .map(|m| match (&m.name, &m.email) {
+            (Some(name), Some(email)) => format!("{name} <{email}>"),
+            (Some(name), None) => name.clone(),
+            (None, Some(email)) => email.clone(),
+            (None, None) => String::from("(unknown)"),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn kilobytes(bytes: i64) -> String {
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else if bytes < 1024 * 1024 {
+        format!("{:.0} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    }
 }

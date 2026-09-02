@@ -11,9 +11,9 @@
 //! `0.0.0.0:443`. Which of those happens is decided by `listen::resolve`, so
 //! the rule is shared with the IMAP listener rather than written twice.
 //!
-//! **Phases 1-3**: the listener, health, static assets, authentication, the
-//! folder list and paged message lists. Message bodies and attachments are
-//! phase 4-5.
+//! **Phases 1-4a**: the listener, health, static assets, authentication, the
+//! folder list, paged message lists, and plain-text message bodies. Sanitised
+//! HTML (4b) and attachment downloads (5) are still to come.
 //!
 //! Every endpoint that touches mail takes a [`UserScope`], which cannot be
 //! constructed without a valid session, and passes its id to a query that binds
@@ -39,6 +39,7 @@ use crate::listen;
 use crate::naming;
 use crate::ratelimit::Limiter;
 use crate::session::{self, UserScope};
+use crate::store::Store;
 
 /// Everything a handler needs, cloned per request.
 #[derive(Clone)]
@@ -51,6 +52,25 @@ pub struct AppState {
     /// Whether cookies carry `Secure`. Follows the listener, not a constant.
     pub secure_cookies: bool,
     pub limiter: Arc<Limiter>,
+    /// S3 clients, one per bucket, built on first use.
+    ///
+    /// `Store::open` constructs an AWS SDK client, which is far too much work to
+    /// repeat per request. The IMAP server caches one per connection; HTTP has
+    /// no connection to hang it on, so it is cached here and shared.
+    pub stores: Arc<tokio::sync::Mutex<std::collections::HashMap<String, Store>>>,
+}
+
+impl AppState {
+    /// The store for a bucket, opening and caching it if needed.
+    async fn store(&self, bucket: &str) -> Result<Store> {
+        let mut cache = self.stores.lock().await;
+        if let Some(store) = cache.get(bucket) {
+            return Ok(store.clone());
+        }
+        let store = Store::open(&self.config, bucket).await?;
+        cache.insert(bucket.to_string(), store.clone());
+        Ok(store)
+    }
 }
 
 pub async fn run(
@@ -93,6 +113,7 @@ pub async fn run(
         session_key: session::derive_signing_key(&config.encryption_key),
         secure_cookies: transport.is_tls(),
         limiter: Arc::new(Limiter::new()),
+        stores: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
     };
 
     let app = router(state, assets.clone())?;
@@ -134,6 +155,7 @@ fn router(state: AppState, assets: Option<PathBuf>) -> Result<Router> {
         .route("/session", get(whoami))
         .route("/folders", get(folders))
         .route("/folders/{id}/messages", get(messages))
+        .route("/messages/{blake3}", get(message))
         // The API needs its OWN fallback. `nest` does not isolate 404s: an
         // unmatched path under /api falls through to the outer fallback, which
         // is the SPA shell -- so without this, a misspelled endpoint answers
@@ -617,4 +639,126 @@ mod tests {
         assert_eq!((-5i64).clamp(1, MAX_PAGE), 1);
         assert_eq!(50i64.clamp(1, MAX_PAGE), 50);
     }
+}
+
+/// One message, opened.
+///
+/// Phase 4a: the plain-text body. `has_html` reports that an HTML alternative
+/// exists without shipping it -- rendering that safely needs the sanitiser,
+/// sandbox and CSP of WEBAPP-PLAN.md 6, which is phase 4b. Saying so is better
+/// than silently showing an empty pane for an HTML-only message.
+async fn message(
+    State(state): State<AppState>,
+    scope: UserScope,
+    Path(blake3): Path<String>,
+) -> Response {
+    // Reject a malformed address before it reaches the database or S3. The
+    // value is user-supplied and ends up in an object key.
+    if blake3.len() != 64 || !blake3.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "malformed message id" })),
+        )
+            .into_response();
+    }
+
+    // Authorises and locates in one query: the bucket comes back from the row,
+    // so this handler never chooses which bucket to read.
+    let found = match db::message_for_user(&state.pool, scope.user_id(), &blake3).await {
+        Ok(found) => found,
+        Err(e) => return internal("message lookup", e),
+    };
+
+    let Some((bucket, size, internaldate)) = found else {
+        // Identical whether the message does not exist or belongs to someone
+        // else: distinguishing them would confirm the existence of another
+        // user's mail.
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "no such message" })),
+        )
+            .into_response();
+    };
+
+    let store = match state.store(&bucket).await {
+        Ok(store) => store,
+        Err(e) => return internal("opening bucket", e),
+    };
+
+    // get_message re-hashes on read and rejects a mismatch, so a corrupted or
+    // substituted object fails here rather than being rendered.
+    let raw = match store.get_message(&blake3).await {
+        Ok(raw) => raw,
+        Err(e) => return internal("fetching message body", e),
+    };
+
+    let Some(parsed) = mail_parser::MessageParser::default().parse(&raw) else {
+        // Archived bytes that will not parse. Real, and not something to hide:
+        // the message is in the archive and this is the honest report of it.
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({ "error": "message could not be parsed" })),
+        )
+            .into_response();
+    };
+
+    let detail = archive_api_types::MessageDetail {
+        blake3,
+        subject: parsed.subject().map(str::to_string),
+        from: mailboxes(parsed.from()),
+        to: mailboxes(parsed.to()),
+        cc: mailboxes(parsed.cc()),
+        // The archive's internaldate, not the Date: header. The header is
+        // sender-controlled and frequently wrong or absent; internaldate is what
+        // the list is sorted by, so using it keeps the two consistent.
+        date: internaldate.to_rfc3339(),
+        size,
+        text: parsed.body_text(0).map(|t| t.into_owned()),
+        has_html: parsed.body_html(0).is_some(),
+        parts: parts(&parsed),
+    };
+
+    (
+        StatusCode::OK,
+        // Message bodies are private. Without this a shared or proxy cache could
+        // retain one, and the browser could serve it from disk after logout.
+        [(header::CACHE_CONTROL, "private, no-store")],
+        Json(detail),
+    )
+        .into_response()
+}
+
+fn mailboxes(address: Option<&mail_parser::Address>) -> Vec<archive_api_types::Mailbox> {
+    let Some(address) = address else {
+        return Vec::new();
+    };
+    address
+        .iter()
+        .map(|a| archive_api_types::Mailbox {
+            name: a.name().map(str::to_string),
+            email: a.address().map(str::to_string),
+        })
+        .collect()
+}
+
+/// Attachments and inline parts, for display. Downloading them is phase 5.
+fn parts(parsed: &mail_parser::Message) -> Vec<archive_api_types::Part> {
+    use mail_parser::MimeHeaders;
+
+    parsed
+        .attachments()
+        .enumerate()
+        .map(|(index, part)| archive_api_types::Part {
+            index,
+            filename: part.attachment_name().map(str::to_string),
+            content_type: part
+                .content_type()
+                .map(|c| match c.subtype() {
+                    Some(sub) => format!("{}/{}", c.ctype(), sub),
+                    None => c.ctype().to_string(),
+                })
+                .unwrap_or_else(|| "application/octet-stream".to_string()),
+            size: part.len() as i64,
+        })
+        .collect()
 }

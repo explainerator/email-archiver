@@ -93,3 +93,47 @@ pub struct MessagePage {
     /// server's business and is free to change.
     pub next: Option<String>,
 }
+
+/// A named mailbox, as displayed in the reading pane.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Mailbox {
+    pub name: Option<String>,
+    pub email: Option<String>,
+}
+
+/// A non-body part: attachment, or an inline image the body refers to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Part {
+    /// Index within the message, used to address the part for download.
+    pub index: usize,
+    pub filename: Option<String>,
+    /// The part's DECLARED content type, shown for information only.
+    ///
+    /// Never trusted when serving bytes: the sender controls it, so the
+    /// download endpoint sets `Content-Type` from its own extension mapping and
+    /// the inline-image endpoint sniffs magic bytes. See WEBAPP-PLAN.md 6.4/7.
+    pub content_type: String,
+    pub size: i64,
+}
+
+/// One message, opened.
+///
+/// Phase 4a carries the plain-text body only. `has_html` says an HTML
+/// alternative exists without shipping it, so the client can be honest about
+/// what it is not yet showing; rendering that safely is phase 4b (§6).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessageDetail {
+    pub blake3: String,
+    pub subject: Option<String>,
+    pub from: Vec<Mailbox>,
+    pub to: Vec<Mailbox>,
+    pub cc: Vec<Mailbox>,
+    /// RFC 3339, from the archive's `internaldate`.
+    pub date: String,
+    pub size: i64,
+    /// The `text/plain` part, if the message has one.
+    pub text: Option<String>,
+    /// Whether a `text/html` alternative exists.
+    pub has_html: bool,
+    pub parts: Vec<Part>,
+}

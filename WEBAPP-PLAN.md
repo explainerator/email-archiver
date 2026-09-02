@@ -1,8 +1,8 @@
 # archive-web — a browser client for the mail archive
 
-Status: **Phases 1-3 done.** A Dioxus app with login, folder pane and paged message
-list, served by `email-archiver serve-web`. Reading pane, attachments, search and TLS
-(phases 4-7) outstanding.
+Status: **Phases 1-4a done.** A Dioxus app with login, folder pane and paged message
+list and a plain-text reading pane, served by `email-archiver serve-web`. Sanitised HTML
+(4b), attachments, search and TLS (phases 5-7) outstanding.
 
 Build and run locally:
 
@@ -589,7 +589,7 @@ deployer: one binary, one upload, two units.
 | **1** | ✅ `serve-web`: axum, static assets, `127.0.0.1:8000` plaintext | Done — `/api/health` reports database reachability; unknown API routes 404 rather than returning index.html; non-loopback plaintext refused; IMAP unaffected (35 tests) |
 | **2** | ✅ Login, session cookie, `UserScope`, login throttle | Done — `/api/session` 401s without a valid cookie; forged and expired cookies rejected; unknown-user and wrong-password responses byte-identical; throttle engages on the 10th failure |
 | **3** | ✅ Folder pane + message list, keyset pagination | Done — Dioxus 0.7 app served by the binary; keyset paging flat with depth (§5.2), no index needed |
-| **4a** | Reading pane, **plain text only** | Message bodies readable |
+| **4a** | ✅ Reading pane, **plain text only** | Done — headers, `text/plain` body, part list. HTML-only messages say so rather than showing an empty pane |
 | **4b** | Sanitised HTML (§6) | A known-hostile message renders inert |
 | **5** | Attachments; `\Seen` on read | Download works; read state agrees with Thunderbird |
 | **6** | Search step 1 (subject/from + `pg_trgm`) | Finding a known message takes one query |

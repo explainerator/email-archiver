@@ -81,3 +81,31 @@ body {
   padding: .5rem; border: 1px solid var(--line); border-radius: 4px;
   background: none; color: inherit; font: inherit; cursor: pointer;
 }
+
+/* Reading pane */
+.list tr { cursor: pointer; }
+.list tr:hover td { background: color-mix(in srgb, var(--fg) 5%, transparent); }
+.list tr.open td { background: color-mix(in srgb, var(--accent) 16%, transparent); }
+
+.message { padding: 1rem 1.25rem; }
+.message header { border-bottom: 1px solid var(--line); padding-bottom: .75rem; }
+.message h2 { margin: 0 0 .5rem; font-size: 1.1rem; line-height: 1.35; }
+.message dl {
+  display: grid; grid-template-columns: 3.5rem 1fr;
+  gap: .15rem .5rem; margin: 0; font-size: .85rem;
+}
+.message dt { color: var(--muted); }
+.message dd { margin: 0; overflow-wrap: anywhere; }
+
+.parts {
+  margin: .75rem 0 0; padding: .5rem .75rem; list-style: none;
+  border: 1px solid var(--line); border-radius: 4px; font-size: .85rem;
+}
+.parts li { padding: .15rem 0; overflow-wrap: anywhere; }
+
+/* Plain text: preserve the sender's wrapping, but never overflow the pane. */
+.body {
+  margin: 1rem 0 0; font: inherit;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.note { border-top: 1px solid var(--line); margin-top: 1rem; font-size: .85rem; }

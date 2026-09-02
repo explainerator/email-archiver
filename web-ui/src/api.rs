@@ -130,3 +130,11 @@ fn encode(value: &str) -> String {
         })
         .collect()
 }
+
+pub async fn message(blake3: &str) -> Result<archive_api_types::MessageDetail, Error> {
+    let response = Request::get(&format!("/api/messages/{}", encode(blake3)))
+        .send()
+        .await
+        .map_err(|e| Error::Transport(e.to_string()))?;
+    decode(response).await
+}

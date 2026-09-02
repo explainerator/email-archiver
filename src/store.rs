@@ -48,6 +48,9 @@ pub struct Manifest {
     pub size: i64,
 }
 
+/// Cheap to clone: the AWS SDK client is reference-counted internally, so
+/// cloning shares one connection pool rather than building a second.
+#[derive(Clone)]
 pub struct Store {
     client: Client,
     bucket: String,
@@ -222,7 +225,11 @@ impl Store {
                 .await
                 .with_context(|| format!("listing {prefix} in {}", self.bucket))?;
 
-            keys.extend(page.contents().iter().filter_map(|o| o.key().map(String::from)));
+            keys.extend(
+                page.contents()
+                    .iter()
+                    .filter_map(|o| o.key().map(String::from)),
+            );
 
             match page.next_continuation_token() {
                 Some(token) => continuation = Some(token.to_string()),
@@ -341,7 +348,10 @@ mod tests {
     fn folder_separators_cannot_forge_a_path() {
         let odd = Store::manifest_key("k@x.ca", "weird/name", 1);
         assert_eq!(odd, "manifest/k@x.ca/weird%2Fname/1.json");
-        assert_ne!(odd, Store::manifest_key("k@x.ca", "weird", 1).replace("/1", "/name/1"));
+        assert_ne!(
+            odd,
+            Store::manifest_key("k@x.ca", "weird", 1).replace("/1", "/name/1")
+        );
     }
 
     #[test]

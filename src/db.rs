@@ -303,9 +303,17 @@ pub struct PlacementRow {
 }
 
 pub async fn placements_for_user(pool: &PgPool, user_id: i64) -> Result<Vec<PlacementRow>> {
-    let rows: Vec<(String, String, i64, Option<i64>, DateTime<Utc>, bool, String, i64)> =
-        sqlx::query_as(
-            "SELECT a.address, f.name, p.uid, p.source_uid, m.internaldate, p.seen,
+    let rows: Vec<(
+        String,
+        String,
+        i64,
+        Option<i64>,
+        DateTime<Utc>,
+        bool,
+        String,
+        i64,
+    )> = sqlx::query_as(
+        "SELECT a.address, f.name, p.uid, p.source_uid, m.internaldate, p.seen,
                     m.blake3, m.size
              FROM placements p
              JOIN folders  f ON f.id = p.folder_id
@@ -313,10 +321,10 @@ pub async fn placements_for_user(pool: &PgPool, user_id: i64) -> Result<Vec<Plac
              JOIN messages m ON m.id = p.message_id
              WHERE a.user_id = $1
              ORDER BY a.address, f.name, p.uid",
-        )
-        .bind(user_id)
-        .fetch_all(pool)
-        .await?;
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await?;
 
     Ok(rows
         .into_iter()
@@ -345,12 +353,12 @@ pub async fn count_placements(pool: &PgPool, folder_id: i64) -> Result<i64> {
 
 /// Messages for a user with no cached header block yet.
 pub async fn messages_missing_headers(pool: &PgPool, user_id: i64) -> Result<Vec<String>> {
-    Ok(sqlx::query_scalar(
-        "SELECT blake3 FROM messages WHERE user_id = $1 AND headers IS NULL",
+    Ok(
+        sqlx::query_scalar("SELECT blake3 FROM messages WHERE user_id = $1 AND headers IS NULL")
+            .bind(user_id)
+            .fetch_all(pool)
+            .await?,
     )
-    .bind(user_id)
-    .fetch_all(pool)
-    .await?)
 }
 
 /// Record the hierarchy delimiter the source server reported.
@@ -378,8 +386,10 @@ pub async fn source_for(
         row.with_context(|| format!("no account {address:?} in the database"))?;
 
     let host = host.with_context(|| {
-        format!("account {address:?} has no source credentials. Set them with: \
-                 email-archiver set-source {address} <host> <username>")
+        format!(
+            "account {address:?} has no source credentials. Set them with: \
+                 email-archiver set-source {address} <host> <username>"
+        )
     })?;
     let username = username.context("account has a host but no username")?;
     let password_enc = password_enc.context("account has a host but no password")?;
@@ -557,6 +567,34 @@ pub struct MessageRow {
     pub from_addr: Option<String>,
     pub internaldate: chrono::DateTime<chrono::Utc>,
     pub size: i64,
+}
+
+/// Locate one message for a user, returning the bucket it lives in.
+///
+/// Does authorisation and lookup in a single query. The `blake3` is
+/// user-supplied, so the `user_id` bind is what stops a guessed content address
+/// from reading another person's mail -- messages are unique per user precisely
+/// so this check is meaningful (see ARCHIVE-PLAN.md 2.3).
+///
+/// Returns the bucket rather than taking one, so no caller has to decide which
+/// bucket a message belongs in and none can get it wrong.
+pub async fn message_for_user(
+    pool: &PgPool,
+    user_id: i64,
+    blake3: &str,
+) -> Result<Option<(String, i64, chrono::DateTime<chrono::Utc>)>> {
+    let row: Option<(String, i64, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+        "SELECT u.bucket, m.size, m.internaldate
+           FROM messages m
+           JOIN users u ON u.id = m.user_id
+          WHERE m.user_id = $1 AND m.blake3 = $2",
+    )
+    .bind(user_id)
+    .bind(blake3)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row)
 }
 
 /// One user by id, for the web session endpoint.
