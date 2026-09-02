@@ -8,13 +8,14 @@
 //! trusting a restore.
 
 use anyhow::Result;
+use futures::stream::{self, StreamExt};
 use sqlx::PgPool;
 
 use crate::config::Config;
 use crate::db;
 use crate::store::{Manifest, Store};
 
-pub async fn run(config: &Config, pool: &PgPool, login: &str) -> Result<()> {
+pub async fn run(config: &Config, pool: &PgPool, login: &str, deep: bool) -> Result<()> {
     let (user_id, bucket): (i64, String) =
         sqlx::query_as("SELECT id, bucket FROM users WHERE login = $1")
             .bind(login)
@@ -67,23 +68,52 @@ pub async fn run(config: &Config, pool: &PgPool, login: &str) -> Result<()> {
         ));
     }
 
-    // Spot-check that blobs are actually readable and hash to their key.
-    // get_message re-hashes, so a silent corruption surfaces here.
-    let sample: Vec<String> = sqlx::query_scalar(
-        "SELECT blake3 FROM messages WHERE user_id = $1 ORDER BY random() LIMIT 5",
-    )
-    .bind(user_id)
-    .fetch_all(pool)
-    .await?;
+    // Read blobs back and confirm they still hash to their key. get_message
+    // re-hashes, so silent corruption surfaces here rather than when someone
+    // opens a twenty-year-old message.
+    //
+    // Sampling answers "is the archive plausibly intact". Only --deep answers
+    // "is every body actually readable", which is the question that matters
+    // before trusting this as the remote copy.
+    let hashes: Vec<String> = if deep {
+        sqlx::query_scalar("SELECT blake3 FROM messages WHERE user_id = $1")
+            .bind(user_id)
+            .fetch_all(pool)
+            .await?
+    } else {
+        sqlx::query_scalar(
+            "SELECT blake3 FROM messages WHERE user_id = $1 ORDER BY random() LIMIT 5",
+        )
+        .bind(user_id)
+        .fetch_all(pool)
+        .await?
+    };
 
-    let mut verified = 0;
-    for hash in &sample {
-        match store.get_message(hash).await {
-            Ok(_) => verified += 1,
-            Err(e) => problems.push(format!("blob {hash} unreadable: {e}")),
+    let concurrency = config.ingest.concurrency;
+    let store_ref = &store;
+    let results: Vec<(String, Result<()>)> = stream::iter(hashes.iter().map(|h| async move {
+        (h.clone(), store_ref.get_message(h).await.map(|_| ()))
+    }))
+    .buffer_unordered(concurrency)
+    .collect()
+    .await;
+
+    let mut verified = 0usize;
+    for (hash, outcome) in results {
+        match outcome {
+            Ok(()) => verified += 1,
+            Err(e) => problems.push(format!("blob {hash} unreadable or corrupt: {e}")),
         }
     }
-    println!("  spot-check: {verified}/{} sampled blobs verified", sample.len());
+
+    if deep {
+        println!("  deep verify: {verified}/{} blobs read and hash-checked", hashes.len());
+    } else {
+        println!(
+            "  spot-check: {verified}/{} sampled blobs verified (use --deep for all)",
+            hashes.len()
+        );
+    }
 
     if problems.is_empty() {
         println!("  consistent");

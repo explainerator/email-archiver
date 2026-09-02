@@ -33,8 +33,9 @@ USAGE:
         Register a source mailbox feeding that user's archive. <label> becomes
         the IMAP namespace prefix, e.g. work -> work/INBOX.
 
-    email-archiver check <login>
-        Verify Postgres and S3 agree for one user.
+    email-archiver check <login> [--deep]
+        Verify Postgres and S3 agree for one user. Samples 5 blobs by default;
+        --deep reads and hash-checks every message body.
 
     email-archiver rebuild-manifests <login>
         Regenerate all S3 manifests for a user from the database. Use when
@@ -86,7 +87,8 @@ async fn main() -> Result<()> {
         Some("check") => {
             let login = arg(&args, 1, "login")?;
             let pool = connect_db(&config).await?;
-            check::run(&config, &pool, &login).await
+            let deep = args.iter().any(|a| a == "--deep");
+            check::run(&config, &pool, &login, deep).await
         }
 
         Some("rebuild-manifests") => {

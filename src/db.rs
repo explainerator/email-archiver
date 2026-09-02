@@ -328,3 +328,13 @@ pub async fn placements_for_user(pool: &PgPool, user_id: i64) -> Result<Vec<Plac
         })
         .collect())
 }
+
+/// How many messages we hold in one folder.
+pub async fn count_placements(pool: &PgPool, folder_id: i64) -> Result<i64> {
+    Ok(
+        sqlx::query_scalar("SELECT count(*) FROM placements WHERE folder_id = $1")
+            .bind(folder_id)
+            .fetch_one(pool)
+            .await?,
+    )
+}

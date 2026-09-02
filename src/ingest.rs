@@ -157,6 +157,7 @@ async fn ingest_folder(
     };
 
     let uid_validity = mailbox.uid_validity.unwrap_or(0) as i64;
+    let source_exists = mailbox.exists as i64;
     let folder = db::folder_for_ingest(pool, account.id, name, uid_validity).await?;
 
     let range = format!("{}:*", folder.last_source_uid + 1);
@@ -269,6 +270,24 @@ async fn ingest_folder(
         processed += chunk.len();
         progress(&format!(
             "    {name}: {processed}/{total} done, {new_messages} new"
+        ));
+    }
+
+    // Completeness against the source, which the consistency check cannot see:
+    // it only compares our two stores to each other.
+    //
+    // Holding MORE than the source is normal and expected — the archive keeps
+    // messages the source has since deleted. Holding FEWER means mail on the
+    // server never made it here, which is the failure that matters.
+    let held = db::count_placements(pool, folder.id).await?;
+    if held < source_exists {
+        eprintln!(
+            "  WARNING {name}: source reports {source_exists} messages, archive holds {held}              — {} message(s) on the server are not archived",
+            source_exists - held
+        );
+    } else {
+        progress(&format!(
+            "  {name}: {held} archived, source has {source_exists}"
         ));
     }
 
