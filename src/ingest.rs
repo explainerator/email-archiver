@@ -336,6 +336,12 @@ async fn ingest_folder(
             .await
             .with_context(|| format!("searching {name}"))?
             .into_iter()
+            // The range cannot be trusted to exclude what we already have.
+            // IMAP normalises a reversed range by swapping its endpoints, and
+            // `*` means "highest UID" — so `3291:*` on a folder topping out at
+            // 3290 returns 3290 rather than nothing. Without this filter every
+            // re-run re-downloads the last message of every folder.
+            .filter(|uid| *uid as i64 > folder.last_source_uid)
             .collect::<Vec<_>>();
         search.sort_unstable();
         search
