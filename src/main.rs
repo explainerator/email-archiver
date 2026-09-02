@@ -10,11 +10,13 @@ mod diagnose;
 mod envelope;
 mod fetch;
 mod ingest;
+mod listen;
 mod naming;
 mod secrets;
 mod server;
 mod store;
 mod tls;
+mod web;
 
 use anyhow::{Context, Result};
 use config::Config;
@@ -66,6 +68,14 @@ USAGE:
         plaintext; any other address needs TLS, or --allow-plaintext to
         override for local testing. IMAP LOGIN sends the password in the clear,
         so that override puts real passwords on the network.
+
+    email-archiver serve-web [bind] [--allow-plaintext] [--assets <dir>]
+        Read-only web client and HTTP API. Default 127.0.0.1:8000, plaintext.
+        Loopback is always plaintext, whatever tls.* says -- a certificate for
+        the public hostname cannot validate for 127.0.0.1, so TLS there could
+        not work anyway. Any other address needs TLS (phase 7) or
+        --allow-plaintext. --assets serves the built frontend; without it only
+        the API responds.
 
     email-archiver backfill-headers <login>
         Cache header blocks for messages archived before that column existed.
@@ -188,6 +198,29 @@ async fn main() -> Result<()> {
             let allow_plaintext = args.iter().any(|a| a == "--allow-plaintext");
             let pool = connect_db(&config).await?;
             server::run(&std::sync::Arc::new(config), &pool, &bind, allow_plaintext).await
+        }
+
+        Some("serve-web") => {
+            let bind = args
+                .get(1)
+                .filter(|a| !a.starts_with("--"))
+                .cloned()
+                .unwrap_or_else(|| "127.0.0.1:8000".to_string());
+            let allow_plaintext = args.iter().any(|a| a == "--allow-plaintext");
+            let assets = args
+                .iter()
+                .position(|a| a == "--assets")
+                .and_then(|i| args.get(i + 1))
+                .map(std::path::PathBuf::from);
+            let pool = connect_db(&config).await?;
+            web::run(
+                &std::sync::Arc::new(config),
+                &pool,
+                &bind,
+                allow_plaintext,
+                assets,
+            )
+            .await
         }
 
         Some("backfill-headers") => {

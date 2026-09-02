@@ -1,7 +1,7 @@
 # archive-web — a browser client for the mail archive
 
-Status: **design, not started.** Companion to `ARCHIVE-PLAN.md`, which stays the
-authority on storage, ingest and IMAP.
+Status: **Phase 1 done** (listener + health + static hosting); phases 2-7 outstanding.
+Companion to `ARCHIVE-PLAN.md`, which stays the authority on storage, ingest and IMAP.
 
 ---
 
@@ -436,9 +436,20 @@ subcommands behave consistently rather than each having their own logic to remem
 | CSP | No `upgrade-insecure-requests` | With it |
 
 **The guard:** plaintext is permitted on loopback and refused anywhere else unless
-`--allow-plaintext` is passed, which warns loudly. Identical to `serve`. TLS is used when
-`tls.cert_path` and `tls.key_path` are set — the same config the IMAP listener reads, so
-there is nothing extra to configure for production.
+`--allow-plaintext` is passed, which warns loudly. The rule is shared with `serve` —
+`listen::resolve` — so it exists once rather than in two copies that can drift.
+
+**Loopback is always plaintext for the web listener, whatever `tls.*` says.** This differs
+from `serve`, for a reason specific to browsers: the certificate is issued for
+`archive.thebackroom420.ca`, so a browser dialling `https://127.0.0.1:8000` rejects it on
+hostname mismatch. TLS there cannot work, not merely "is unnecessary". The useful
+consequence is that **the production `config.toml` works unchanged on a development
+machine**, even though its `tls.cert_path` points at an `/etc/letsencrypt/...` path that
+does not exist there.
+
+`serve` keeps the opposite policy (`Loopback::MayUseTls`), because an IMAP test client can
+be told to skip verification — that is a real workflow and removing it would be a
+regression.
 
 Serving HTTPS directly from the binary via `CertReloader` means no reverse proxy: same
 certificate, same mtime-triggered reload, no Caddy or nginx as a third moving part on a
@@ -514,7 +525,7 @@ deployer: one binary, one upload, two units.
 
 | Phase | Work | Gate |
 |---|---|---|
-| **1** | `serve-web` skeleton: axum, static assets, `127.0.0.1:8000` plaintext | Health endpoint answers locally |
+| **1** | ✅ `serve-web`: axum, static assets, `127.0.0.1:8000` plaintext | Done — `/api/health` reports database reachability; unknown API routes 404 rather than returning index.html; non-loopback plaintext refused; IMAP unaffected (35 tests) |
 | **2** | Login, session cookie, `UserScope` | No data reachable unauthenticated |
 | **3** | Folder pane + message list, keyset pagination | Browse the 53k INBOX without a slow page |
 | **4a** | Reading pane, **plain text only** | Message bodies readable |
@@ -533,8 +544,9 @@ end rather than being setup friction on day one.
 
 ## 13. Open questions
 
-**Q1 — Dioxus version.** 0.6 and 0.7 differ in project setup. Which is current at
-implementation time, and pin to it. *Answer before Phase 1.*
+**Q1 — RESOLVED: Dioxus 0.7.** `dx 0.7.3` is already installed on the development
+machine, and 0.8 is still an alpha. Pin to 0.7 and treat the 0.8 upgrade as scheduled
+work (W6).
 
 **Q2 — Hostname.** Reuse `archive.thebackroom420.ca` on 443 (IMAPS is on 993, so no
 clash), or a separate `mail.thebackroom420.ca`? Reusing means one certificate and no DNS

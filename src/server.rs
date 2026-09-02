@@ -33,7 +33,7 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 
 use crate::config::Config;
-use crate::tls::CertReloader;
+use crate::listen;
 use crate::db;
 use crate::fetch as fetchlib;
 use crate::naming;
@@ -53,38 +53,41 @@ pub async fn run(
     bind: &str,
     allow_plaintext: bool,
 ) -> Result<()> {
-    let tls = match config.tls.paths()? {
-        Some((cert, key)) => Some(Arc::new(CertReloader::new(cert, key)?)),
-        None => None,
-    };
-
     // IMAP LOGIN puts the password on the wire in clear text. Serving plaintext
     // on anything but loopback would hand every password to whoever is on the
-    // path, so that combination is refused rather than warned about.
-    if tls.is_none() && !is_loopback(bind) {
-        anyhow::ensure!(
-            allow_plaintext,
-            "refusing to serve plaintext on {bind}: IMAP sends passwords in clear text.\n\
-             Set tls.cert_path and tls.key_path, bind 127.0.0.1, or pass --allow-plaintext \
-             to override for local testing."
-        );
-        // A flag rather than a config option, deliberately: a config setting
-        // persists and would quietly remain enabled after deployment. This has
-        // to be typed every time.
-        eprintln!(
-            "  WARNING: serving PLAINTEXT on {bind} because --allow-plaintext was given."
-        );
+    // path, so that combination is refused rather than warned about. The rule
+    // is shared with the web listener -- see listen.rs.
+    let transport = listen::resolve(
+        config,
+        bind,
+        allow_plaintext,
+        "IMAP",
+        "IMAP sends passwords in clear text",
+        // Unchanged behaviour: a loopback listener still serves TLS when one is
+        // configured, which is how the TLS path gets tested locally.
+        listen::Loopback::MayUseTls,
+    )?;
+    if !transport.is_tls() && !listen::is_loopback(bind) {
         eprintln!("  Every IMAP password on this listener crosses the network in clear text.");
     }
+
+    let tls = match &transport {
+        listen::Transport::Tls(reloader) => Some(Arc::clone(reloader)),
+        listen::Transport::Plaintext { .. } => None,
+    };
 
     let listener = TcpListener::bind(bind)
         .await
         .with_context(|| format!("binding {bind}"))?;
 
-    match (&tls, is_loopback(bind)) {
-        (Some(_), _) => println!("IMAP listening on {bind} (TLS)"),
-        (None, true) => println!("IMAP listening on {bind} (plaintext, loopback)"),
-        (None, false) => println!("IMAP listening on {bind} (PLAINTEXT, NOT loopback)"),
+    match &transport {
+        listen::Transport::Tls(_) => println!("IMAP listening on {bind} (TLS)"),
+        listen::Transport::Plaintext { loopback: true } => {
+            println!("IMAP listening on {bind} (plaintext, loopback)")
+        }
+        listen::Transport::Plaintext { loopback: false } => {
+            println!("IMAP listening on {bind} (PLAINTEXT, NOT loopback)")
+        }
     }
     println!("  Passwords verified against users.password_hash.");
 
@@ -125,14 +128,6 @@ pub async fn run(
             println!("--- disconnected ---");
         });
     }
-}
-
-/// Only loopback may be served without TLS.
-fn is_loopback(bind: &str) -> bool {
-    bind.rsplit_once(':')
-        .and_then(|(host, _)| host.trim_matches(['[', ']']).parse::<std::net::IpAddr>().ok())
-        .map(|ip| ip.is_loopback())
-        .unwrap_or(false)
 }
 
 async fn serve(config: &Config, pool: &PgPool, mut stream: Stream) -> Result<()> {

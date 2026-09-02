@@ -34,3 +34,8 @@ argon2 = { version = "0.5", features = ["std"] }
 chacha20poly1305 = "0.10"
 rand = "0.8"
 rustls-pemfile = "2.2.0"
+
+# Web client backend (WEBAPP-PLAN.md). The browser cannot speak IMAP, so the
+# archive is served to it over HTTP by the same binary.
+axum = "0.8"
+tower-http = { version = "0.7", features = ["fs"] }
