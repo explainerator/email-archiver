@@ -18,3 +18,8 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 anyhow = "1"
+aws-config = "1.11.0"
+aws-sdk-s3 = "1.144.0"
+blake3 = "1.8.7"
+serde_json = "1.0.151"
+chrono = "0.4.45"

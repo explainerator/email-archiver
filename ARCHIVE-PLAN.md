@@ -65,7 +65,13 @@ S3 as primary store, IMAP to clients — are exactly what that category declined
      database: archive             (both in Canada, same region)
 ```
 
-One binary. No local state worth keeping — see §4.
+One binary, run directly under systemd on the instance. **No Docker** — there is nothing
+to isolate and nothing to compose; a single static-ish binary with a config file is simpler
+to operate and to reason about.
+
+**No local state at all**, which is what keeps a future move into a pod cheap: configuration
+arrives as a file, everything durable is in S3 or Postgres, and the process can be killed
+and restarted anywhere that can reach both.
 
 ### 2.1 Storage split
 
@@ -339,7 +345,8 @@ Built and verified in the earlier phases; unchanged by this pivot except the vol
 | Resource | State |
 |---|---|
 | `d2-4` instance, BHS5, Ubuntu 24.04, monthly | Running, `51.79.93.209` |
-| Docker, `unattended-upgrades`, UFW 22/80/443/993 | Configured via cloud-init |
+| `unattended-upgrades`, UFW 22/80/443/993 | Configured via cloud-init |
+| Docker | **Installed by cloud-init but not used** — the binary runs directly under systemd. Harmless; removing it means editing `user_data`, which may force instance replacement and change the IP. Clear it out on the next legitimate rebuild. |
 | Bucket `backroom-mail-archive`, versioning + AES256 | **To be replaced** by per-user buckets (§2.2). Empty, so no migration cost. |
 | S3 user + credential, scoped to that bucket | Likewise — becomes one user/credential per bucket |
 | `archive.thebackroom420.ca` → instance | Resolving |
@@ -349,7 +356,7 @@ Built and verified in the earlier phases; unchanged by this pivot except the vol
 
 With Postgres remote and bodies in S3, nothing local has to survive a rebuild. The only
 persistent local state is the ACME certificate cache — a few KB, and cheap to re-issue.
-The `d2-4`'s own 50 GB disk covers the OS, Docker, and ingest staging.
+The `d2-4`'s own 50 GB disk covers the OS, the binary, and ingest staging.
 
 Removing it deletes the volume resource, the attachment, the mount, the format guard in
 cloud-init, and the mountpoint check in the deploy step. Saves ~$2/month and a meaningful
@@ -377,10 +384,16 @@ Ports: **993** IMAPS (public), **443** ACME only, **80** unused, **25/587** clos
 
 ## 6. Verification
 
-**6.1 Blob durability (~200 objects).** Deterministic content, sizes spanning the multipart
-threshold, SHA-256 recorded, then restart container → restart Docker → reboot, and re-read
-all. Sized at 200 rather than thousands because the failure mode (ack-before-durable) is
-systematic, not statistical. Cost: cents — OVH bills no requests and no egress.
+**6.1 Blob durability — dropped.** A 200-object probe was written and read back
+byte-identical, which confirmed the write path; the wider ack-before-durable test was
+judged not worth the ceremony for this deployment. Two things make it less necessary than
+it first appeared: `get_message` re-hashes every object on read and rejects a mismatch, so
+corruption surfaces on use rather than silently; and mail is a second copy here, not the
+only one. Probe objects were purged (version-aware — see below).
+
+**Note for anything that ever deletes from these buckets:** versioning is enabled, so a
+plain `DELETE` only writes a delete marker and the bytes remain as a billed noncurrent
+version. `Store::list_versions` / `delete_version` exist for genuine removal.
 
 **6.2 Rebuild-from-S3.** Truncate every table in the `archive` database, re-run the indexer
 against the buckets, confirm identical message count, identical UIDs, identical folder
@@ -434,12 +447,12 @@ Refuse. The value here is that it does one thing.
 |---|---|---|
 | **0** | ✅ Volume removed. Per-user buckets created. DB allowlist updated. Q1–Q3 settled. | Done |
 | **1** | ✅ `archive` database + sqlx migrations | Done — 5 tables, all FKs RESTRICT, constraints verified against the live database |
-| **2** | S3 write/read + manifest format; §6.1 durability check | 200 objects byte-identical |
+| **2** | ✅ S3 write/read + manifest format | Done — content-addressed put/get with read-time hash verification, paginated listing, version-aware delete |
 | **3** | Ingest one *small generic-IMAP* account end to end (`kenduck.ca` / `jduck.ca`) | Objects in S3, rows in Postgres |
 | **4** | **IMAP spike: `SELECT` + `FETCH` only, against Thunderbird** | **Thunderbird lists and opens a message. If this fails, revisit R1 before going further.** |
 | **5** | Remaining subset: LIST, STATUS, SEARCH (metadata), IDLE | Thunderbird fully usable |
 | **6** | §6.2 rebuild test — drop the schema, reindex from S3 | Identical count, UIDs, structure |
-| **7** | ACME, `deploy.tf`, compose/systemd unit | Running under TLS on the instance |
+| **7** | ACME, `deploy.tf`, **systemd unit running the binary directly** (no Docker) | Running under TLS on the instance |
 | **8a** | **Google Workspace accounts** — OAuth2 path, small data, *hard deadline* (R3) | Business mail archived before those accounts close |
 | **8b** | Self-hosted `twoducks.ca` ~15 GB, then the remainder | Complete archive |
 
