@@ -8,6 +8,7 @@ mod config;
 mod db;
 mod envelope;
 mod ingest;
+mod server;
 mod store;
 
 use anyhow::{Context, Result};
@@ -40,6 +41,10 @@ USAGE:
     email-archiver rebuild-manifests <login>
         Regenerate all S3 manifests for a user from the database. Use when
         manifests are missing, or were written under an older key scheme.
+
+    email-archiver serve [bind]
+        Read-only IMAP server (Phase 4 spike). Default 127.0.0.1:1143.
+        Plaintext, loopback only, ANY password accepted — not a service yet.
 
     email-archiver ingest <address>
         Pull mail from one source mailbox. Resumable: re-running continues
@@ -95,6 +100,15 @@ async fn main() -> Result<()> {
             let login = arg(&args, 1, "login")?;
             let pool = connect_db(&config).await?;
             check::rebuild_manifests(&config, &pool, &login).await
+        }
+
+        Some("serve") => {
+            let bind = args
+                .get(1)
+                .cloned()
+                .unwrap_or_else(|| "127.0.0.1:1143".to_string());
+            let pool = connect_db(&config).await?;
+            server::run(&std::sync::Arc::new(config), &pool, &bind).await
         }
 
         Some("ingest") => {

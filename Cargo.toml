@@ -28,3 +28,4 @@ futures = "0.3.34"
 async-imap = { version = "0.11.3", default-features = false, features = ["runtime-tokio"] }
 tokio-rustls = "0.26.4"
 webpki-roots = "1.0.9"
+imap-next = "0.3.4"
