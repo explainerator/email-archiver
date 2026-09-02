@@ -416,10 +416,15 @@ attachments. Confirm write operations are refused cleanly and the client stays u
 
 ## 7. Risks
 
-**R1 — No prior art for `imap-next` as a server.** The crate advertises server support but
-ships no server type, examples, or known users. Mitigation: prototype `SELECT` + `FETCH`
-against Thunderbird **first**. If the abstraction fights us, better to know in week one —
-`imap-codec` alone is still usable at a lower level.
+**R1 — RESOLVED.** `imap-next` does provide a `Server` type, with parsed
+`CommandReceived` events, `enqueue_data`/`enqueue_status` and `idle_accept`. The remaining
+IMAP work is semantics, not parsing, and no fallback to raw `imap-codec` is needed.
+
+**R6 — The IMAP server has no real authentication.** `users.password_hash` is a
+placeholder, any password is accepted, and it binds loopback speaking plaintext. Fine for a
+spike; unacceptable the moment it is reachable from anywhere else. **Real auth and TLS come
+before exposure, not after** — this is the one risk that turns into a breach rather than an
+inconvenience.
 
 **R2 — `FETCH` correctness against real-world MIME.** Twenty years of mail includes
 malformed messages. Mitigation: `mail-parser` is battle-tested; never re-encode — always
