@@ -3,32 +3,10 @@
 //! Storage in S3 (one bucket per user), index in Postgres, IMAPS to clients.
 //! See ARCHIVE-PLAN.md for the design and phasing.
 
-mod check;
-mod config;
-mod db;
-mod diagnose;
-mod envelope;
-mod fetch;
-mod ingest;
-mod listen;
-mod naming;
-mod ratelimit;
-mod sanitise;
-mod secrets;
-mod server;
-mod session;
-mod store;
-mod tls;
-mod web;
-
 use anyhow::{Context, Result};
-use config::Config;
-use sqlx::postgres::PgPoolOptions;
-
-/// The archive has its own database on a cluster shared with the game services
-/// (`defaultdb`) and `backroom`. Writing into the wrong one would be difficult
-/// to notice and unpleasant to unpick, so it is asserted before migrating.
-const EXPECTED_DATABASE: &str = "archive";
+use email_archiver::config::Config;
+use email_archiver::{check, db, diagnose, ingest, secrets, server, web};
+use email_archiver::{connect_db, EXPECTED_DATABASE};
 
 const USAGE: &str = "\
 email-archiver
@@ -337,42 +315,6 @@ fn arg(args: &[String], index: usize, name: &str) -> Result<String> {
     args.get(index)
         .cloned()
         .with_context(|| format!("missing argument <{name}>\n\n{USAGE}"))
-}
-
-/// Connect, verify this is the archive database, and bring the schema up to date.
-///
-/// Migrations run here rather than in a separate command, so the schema can
-/// never lag the binary. A manual step is a step that gets skipped — or worse,
-/// run with a stale binary, which silently applies only the migrations that
-/// existed when *it* was built and reports success.
-///
-/// sqlx takes an advisory lock while migrating, so concurrent starts are safe.
-///
-/// The database guard lives here too: the cluster also hosts the game services'
-/// `defaultdb`, and every command goes through this function so neither check
-/// can be forgotten by a new subcommand.
-async fn connect_db(config: &Config) -> Result<sqlx::PgPool> {
-    let pool = PgPoolOptions::new()
-        .max_connections(config.database.max_connections)
-        .connect(&config.database.url)
-        .await
-        .context("connecting to Postgres (is this host on the database IP allowlist?)")?;
-
-    let database: String = sqlx::query_scalar("SELECT current_database()")
-        .fetch_one(&pool)
-        .await?;
-    anyhow::ensure!(
-        database == EXPECTED_DATABASE,
-        "connected to database {database:?}, expected {EXPECTED_DATABASE:?}. \
-         Refusing to continue — this cluster also hosts the game services' `defaultdb`."
-    );
-
-    sqlx::migrate!("./migrations")
-        .run(&pool)
-        .await
-        .context("applying migrations")?;
-
-    Ok(pool)
 }
 
 /// Report the schema. Migrations have already run in `connect_db`; this exists

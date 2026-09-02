@@ -57,3 +57,7 @@ archive-api-types = { path = "api-types" }
 # archive is served to it over HTTP by the same binary.
 axum = "0.8"
 tower-http = { version = "0.7", features = ["fs", "set-header", "compression-gzip"] }
+
+[dev-dependencies]
+# Integration tests in tests/ drive async database calls directly.
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

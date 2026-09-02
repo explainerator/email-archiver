@@ -721,10 +721,14 @@ pub async fn search(
                 m.internaldate,
                 m.size,
                 m.has_attachments,
-                f.id,
-                a.label,
-                f.name,
-                a.hierarchy_delimiter
+                -- Aliased to match SearchRow's field names. sqlx::FromRow
+                -- binds by COLUMN NAME, so an unaliased f.id arrives as id
+                -- and fails to map onto folder_id -- at runtime, not at
+                -- compile time, which is how this shipped broken once.
+                f.id                   AS folder_id,
+                a.label                AS account_label,
+                f.name                 AS folder_name,
+                a.hierarchy_delimiter  AS hierarchy_delimiter
            FROM matched m
            JOIN placements p ON p.message_id = m.id
            JOIN folders    f ON f.id = p.folder_id
