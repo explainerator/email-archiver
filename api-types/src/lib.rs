@@ -157,3 +157,32 @@ pub struct MessageDetail {
     pub blocked_images: usize,
     pub parts: Vec<Part>,
 }
+
+// ---------------------------------------------------------------------------
+// Search
+// ---------------------------------------------------------------------------
+
+/// One search result: the message, plus which folder it was found in.
+///
+/// Search spans every folder, so a hit without its location would leave the
+/// reader unable to tell a work receipt from a personal one, or to go and see
+/// the surrounding thread.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchHit {
+    pub message: MessageSummary,
+    pub folder_id: i64,
+    pub folder_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchPage {
+    pub hits: Vec<SearchHit>,
+    pub next: Option<String>,
+}
+
+/// Shortest query accepted.
+///
+/// A single character matches essentially the whole archive, which is a slow
+/// query returning nothing useful. Enforced on both sides: the client to avoid
+/// the round trip, the server because the client is not the only caller.
+pub const MIN_SEARCH_LEN: usize = 2;

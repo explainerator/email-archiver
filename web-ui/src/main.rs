@@ -9,7 +9,9 @@
 
 mod api;
 
-use archive_api_types::{Folder, Identity, Mailbox, MessageDetail, MessageSummary};
+use archive_api_types::{
+    Folder, Identity, Mailbox, MessageDetail, MessageSummary, SearchHit, MIN_SEARCH_LEN,
+};
 use dioxus::prelude::*;
 
 const CSS: Asset = asset!("/assets/main.css");
@@ -117,15 +119,51 @@ fn Shell(identity: Identity, auth: Signal<Auth>) -> Element {
     let mut selected = use_signal(|| None::<Folder>);
     let mut open = use_signal(|| None::<String>);
 
+    // The term that has been SUBMITTED, kept apart from what is being typed:
+    // searching per keystroke would fire a ~570 ms query per character.
+    let mut query = use_signal(String::new);
+    let mut typed = use_signal(String::new);
+
     let sign_out = move |_| async move {
         let _ = api::logout().await;
         auth.set(Auth::SignedOut);
+    };
+
+    let submit_search = move |event: Event<FormData>| {
+        event.prevent_default();
+        let term = typed().trim().to_string();
+        // Checked here as well as on the server: one character matches most of
+        // the archive, and there is no point paying for the round trip to be
+        // told so.
+        if term.chars().count() >= MIN_SEARCH_LEN {
+            query.set(term);
+            open.set(None);
+        }
     };
 
     rsx! {
         div { class: "shell",
             header {
                 strong { "Mail archive" }
+                form { class: "search", onsubmit: submit_search,
+                    input {
+                        r#type: "search",
+                        placeholder: "Search subject and sender",
+                        value: "{typed}",
+                        oninput: move |e| typed.set(e.value()),
+                    }
+                    if !query().is_empty() {
+                        button {
+                            r#type: "button",
+                            class: "link",
+                            onclick: move |_| {
+                                query.set(String::new());
+                                typed.set(String::new());
+                            },
+                            "Clear"
+                        }
+                    }
+                }
                 span { class: "muted", "{identity.display_name}" }
                 button { class: "link", onclick: sign_out, "Sign out" }
             }
@@ -147,9 +185,19 @@ fn Shell(identity: Identity, auth: Signal<Auth>) -> Element {
                     }
                 }
                 section { class: "list",
-                    match selected() {
-                        None => rsx! { p { class: "muted pad", "Select a folder." } },
-                        Some(folder) => rsx! {
+                    match (query(), selected()) {
+                        // Search spans every folder, so results take over the
+                        // list rather than filtering within the selected one.
+                        (q, _) if !q.is_empty() => rsx! {
+                            SearchResults {
+                                key: "{q}",
+                                query: q,
+                                opened: open(),
+                                onopen: move |hash| open.set(Some(hash)),
+                            }
+                        },
+                        (_, None) => rsx! { p { class: "muted pad", "Select a folder." } },
+                        (_, Some(folder)) => rsx! {
                             MessageList {
                                 key: "{folder.id}",
                                 folder,
@@ -483,4 +531,119 @@ fn sender(message: &MessageSummary) -> String {
         .filter(|n| !n.trim().is_empty())
         .or_else(|| message.from.clone())
         .unwrap_or_else(|| String::from("(unknown sender)"))
+}
+
+#[component]
+fn SearchResults(query: String, opened: Option<String>, onopen: EventHandler<String>) -> Element {
+    let mut hits = use_signal(Vec::<SearchHit>::new);
+    let mut next = use_signal(|| None::<String>);
+    let mut error = use_signal(|| None::<String>);
+    let mut loading = use_signal(|| true);
+
+    // Keyed on the query by the caller, so a new search remounts this component
+    // and the previous results go with it rather than being appended to.
+    use_future({
+        let query = query.clone();
+        move || {
+            let query = query.clone();
+            async move {
+                loading.set(true);
+                match api::search(&query, None).await {
+                    Ok(page) => {
+                        hits.set(page.hits);
+                        next.set(page.next);
+                    }
+                    Err(e) => error.set(Some(e.message())),
+                }
+                loading.set(false);
+            }
+        }
+    });
+
+    let load_more = {
+        let query = query.clone();
+        move |_| {
+            let query = query.clone();
+            async move {
+                if loading() {
+                    return;
+                }
+                let Some(cursor) = next() else { return };
+                loading.set(true);
+                match api::search(&query, Some(cursor)).await {
+                    Ok(page) => {
+                        hits.write().extend(page.hits);
+                        next.set(page.next);
+                    }
+                    Err(e) => error.set(Some(e.message())),
+                }
+                loading.set(false);
+            }
+        }
+    };
+
+    // Computed outside rsx!: inside, a bare string literal is a text node, so a
+    // method call cannot follow one. Reading the signals here is still
+    // reactive -- the component re-runs when they change.
+    let status = if loading() {
+        String::from("searching...")
+    } else {
+        format!("{} shown", hits().len())
+    };
+
+    rsx! {
+        div { class: "list-head",
+            strong { "Search: {query}" }
+            span { class: "muted", "{status}" }
+        }
+        if let Some(message) = error() {
+            p { class: "error pad", "{message}" }
+        }
+        table {
+            tbody {
+                for hit in hits() {
+                    tr {
+                        key: "{hit.folder_id}-{hit.message.uid}",
+                        class: if opened.as_deref() == Some(hit.message.blake3.as_str()) {
+                            "open"
+                        } else if hit.message.seen {
+                            ""
+                        } else {
+                            "unseen"
+                        },
+                        onclick: {
+                            let hash = hit.message.blake3.clone();
+                            move |_| onopen.call(hash.clone())
+                        },
+                        td { class: "clip",
+                            if hit.message.has_attachments {
+                                span { title: "Has attachments", "\u{1F4CE}" }
+                            }
+                        }
+                        td {
+                            class: "from",
+                            title: "{hit.message.from.clone().unwrap_or_default()}",
+                            "{sender(&hit.message)}"
+                        }
+                        td { class: "subject",
+                            "{hit.message.subject.clone().unwrap_or_else(|| String::from(\"(no subject)\"))}"
+                            // Which folder the hit came from. Search spans all of
+                            // them, and a receipt in `work` means something
+                            // different from the same receipt in `personal`.
+                            span { class: "infolder", " {hit.folder_path}" }
+                        }
+                        td { class: "date", "{short_date(&hit.message.date)}" }
+                    }
+                }
+            }
+        }
+        if !loading() && hits().is_empty() {
+            p { class: "muted pad", "No messages match." }
+        }
+        if next().is_some() {
+            button { class: "more", onclick: load_more, disabled: loading(),
+                if loading() { "Loading..." } else { "Load more" }
+            }
+        }
+    }
 }

@@ -4260,7 +4260,7 @@ name = "message_types"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "config"
+name = "message_client"
 version = "0.1.0"
 
 [[patch.unused]]
@@ -4268,15 +4268,7 @@ name = "gerns_utilities"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "message-broker-common"
-version = "0.1.0"
-
-[[patch.unused]]
 name = "telemetry"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "message-protocol"
 version = "0.1.0"
 
 [[patch.unused]]
@@ -4284,9 +4276,17 @@ name = "map-common"
 version = "0.1.0"
 
 [[patch.unused]]
+name = "config"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "message-broker-common"
+version = "0.1.0"
+
+[[patch.unused]]
 name = "auth-service-webapp-client"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "message_client"
+name = "message-protocol"
 version = "0.1.0"

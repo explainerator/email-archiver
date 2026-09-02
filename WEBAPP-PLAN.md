@@ -1,9 +1,9 @@
 # archive-web — a browser client for the mail archive
 
-Status: **Phases 1-5 done.** A Dioxus app with login, folder pane and paged message
+Status: **Phases 1-6 done.** A Dioxus app with login, folder pane and paged message
 list and a reading pane showing plain text or sanitised HTML, served by
-`email-archiver serve-web`, with attachment downloads and read state. Search and TLS
-(phases 6-7) outstanding.
+`email-archiver serve-web`, with attachment downloads, read state and search. Only TLS
+(phase 7) is outstanding.
 
 Build and run locally:
 
@@ -443,10 +443,23 @@ survive this change — it rested on the client holding a local copy. **Webmail 
 no local copy, so server-side search is the only search they get.** An archive of 53,000
 messages you can only page through is close to useless.
 
-1. **Substring on `subject` and `from_addr`.** Already denormalised. `ILIKE '%term%'` plus
-   a `pg_trgm` GIN index — one migration, and one `ARCHIVE-PLAN.md` already anticipated
-   ("revisit with pg_trgm in Phase 5 if they prove slow at real volume"). Covers most of
-   what people actually search for.
+1. **Substring on `subject` and `from_addr` — shipped, but WITHOUT the index.**
+
+   The plan called for a `pg_trgm` GIN index. **That extension cannot be created on this
+   database:** the `gern` role is not a superuser and `CREATE EXTENSION` is refused, even
+   though pg_trgm 1.6 is available on the server. Worth knowing what that would have cost
+   if it had gone in as a migration: migrations run inside `connect_db` on *every*
+   command, so one that fails does not degrade search — it stops the archiver starting at
+   all, including the IMAP server.
+
+   Measured unindexed instead, against 151,518 real messages: a page of results costs
+   about **570 ms** of query time (698 ms wall, less the 128 ms baseline round trip).
+   Slower than an indexed search would be, and it degrades linearly with the corpus, but
+   usable — and it needs no migration, which removes that failure mode entirely.
+
+   If it does become annoying, the fix is enabling the extension **on the database**
+   (OVH's control panel is the place to look) rather than changing this code: the query is
+   already written so an index would simply be used.
 
 2. **Full text over bodies**, only if 1 proves insufficient. Needs body text extracted at
    ingest into a `tsvector`, a backfill across every archived message, and real storage.
@@ -593,7 +606,7 @@ deployer: one binary, one upload, two units.
 | **4a** | ✅ Reading pane, **plain text only** | Done — headers, `text/plain` body, part list. HTML-only messages say so rather than showing an empty pane |
 | **4b** | ✅ Sanitised HTML (§6) | Done — structural allowlist, no author styles, opaque-origin sandbox, hash-pinned CSP, remote images blocked and counted, cid: images served same-origin by magic-byte sniff. 21 sanitiser tests |
 | **5** | ✅ Attachments; `\Seen` on read | Done — always-attachment downloads with sanitised filenames, optimistic read state, paperclip column |
-| **6** | Search step 1 (subject/from + `pg_trgm`) | Finding a known message takes one query |
+| **6** | ✅ Search over subject and sender | Done — **without** `pg_trgm`: the extension cannot be created on this database (§8). ~570 ms over 151,518 messages, measured |
 | **7** | TLS on 443, systemd unit, `status` rows | Reachable in production; certificate renews |
 
 Phase 4 is split deliberately: plain text is genuinely useful on its own, so the HTML work

@@ -163,6 +163,7 @@ fn router(state: AppState, assets: Option<PathBuf>) -> Result<Router> {
             "/placements/{folder_id}/{uid}",
             axum::routing::patch(set_seen),
         )
+        .route("/search", get(search))
         // The API needs its OWN fallback. `nest` does not isolate 404s: an
         // unmatched path under /api falls through to the outer fallback, which
         // is the SPA shell -- so without this, a misspelled endpoint answers
@@ -1074,4 +1075,111 @@ async fn set_seen(
             .into_response(),
         Err(e) => internal("set seen", e),
     }
+}
+
+#[derive(Deserialize)]
+struct SearchQuery {
+    q: Option<String>,
+    /// Restrict to one folder. Absent searches everything the user has.
+    folder: Option<i64>,
+    cursor: Option<String>,
+    limit: Option<i64>,
+}
+
+/// Substring search over subject and sender.
+///
+/// Search matters far more for this client than for Thunderbird. A desktop
+/// client holds a full local copy and can search it offline; a webmail user
+/// holds nothing, so this is the only search they get, and an archive of
+/// 150,000 messages that can only be paged through is close to useless.
+async fn search(
+    State(state): State<AppState>,
+    scope: UserScope,
+    Query(q): Query<SearchQuery>,
+) -> Response {
+    let term = q.q.unwrap_or_default().trim().to_string();
+    if term.chars().count() < archive_api_types::MIN_SEARCH_LEN {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": format!(
+                    "search needs at least {} characters",
+                    archive_api_types::MIN_SEARCH_LEN
+                )
+            })),
+        )
+            .into_response();
+    }
+
+    let limit = q.limit.unwrap_or(DEFAULT_PAGE).clamp(1, MAX_PAGE);
+    let cursor = match q.cursor.as_deref().map(decode_cursor) {
+        None => None,
+        Some(Some(c)) => Some(c),
+        Some(None) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "malformed cursor" })),
+            )
+                .into_response()
+        }
+    };
+
+    let rows = match db::search(
+        &state.pool,
+        scope.user_id(),
+        &term,
+        q.folder,
+        cursor,
+        limit + 1,
+    )
+    .await
+    {
+        Ok(rows) => rows,
+        Err(e) => return internal("search", e),
+    };
+
+    let has_more = rows.len() as i64 > limit;
+    let rows = &rows[..rows.len().min(limit as usize)];
+    let next = has_more
+        .then(|| rows.last())
+        .flatten()
+        .map(|last| encode_cursor(last.internaldate, last.uid));
+
+    let hits: Vec<archive_api_types::SearchHit> = rows
+        .iter()
+        .map(|r| {
+            let delimiter = r
+                .hierarchy_delimiter
+                .as_deref()
+                .and_then(|d| d.chars().next());
+            archive_api_types::SearchHit {
+                message: archive_api_types::MessageSummary {
+                    uid: r.uid,
+                    blake3: r.blake3.clone(),
+                    subject: r.subject.clone(),
+                    from: r.from_addr.clone(),
+                    from_name: r.from_name.clone(),
+                    date: r.internaldate.to_rfc3339(),
+                    size: r.size,
+                    seen: r.seen,
+                    has_attachments: r.has_attachments,
+                },
+                folder_id: r.folder_id,
+                folder_path: format!(
+                    "{}/{}",
+                    r.account_label,
+                    naming::to_display(&r.folder_name, delimiter)
+                ),
+            }
+        })
+        .collect();
+
+    (
+        StatusCode::OK,
+        // Results are derived from private mail; a shared cache must not keep
+        // them, and neither should the browser after logout.
+        [(header::CACHE_CONTROL, "private, no-store")],
+        Json(archive_api_types::SearchPage { hits, next }),
+    )
+        .into_response()
 }

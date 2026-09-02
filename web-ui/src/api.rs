@@ -180,3 +180,18 @@ pub async fn set_seen(folder_id: i64, uid: i64, seen: bool) -> Result<(), Error>
 pub fn part_url(blake3: &str, index: usize) -> String {
     format!("/api/messages/{}/parts/{index}", encode(blake3))
 }
+
+pub async fn search(
+    query: &str,
+    cursor: Option<String>,
+) -> Result<archive_api_types::SearchPage, Error> {
+    let mut url = format!("/api/search?q={}", encode(query));
+    if let Some(c) = cursor {
+        url.push_str(&format!("&cursor={}", encode(&c)));
+    }
+    let response = Request::get(&url)
+        .send()
+        .await
+        .map_err(|e| Error::Transport(e.to_string()))?;
+    decode(response, true).await
+}

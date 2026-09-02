@@ -641,6 +641,104 @@ pub async fn set_seen(
     Ok(result.rows_affected() > 0)
 }
 
+/// Substring search over subject and sender, newest first.
+///
+/// **Unindexed by design, for now.** WEBAPP-PLAN.md 8 planned a `pg_trgm` GIN
+/// index; that extension cannot be created on this database -- the `gern` role
+/// is not a superuser and `CREATE EXTENSION` is refused -- and a migration that
+/// fails would stop the archiver starting at all, because migrations run on
+/// every command. Measured instead: over 151,518 messages a page costs roughly
+/// 570 ms of query time. Usable, and it degrades linearly, so if it becomes
+/// annoying the fix is enabling the extension on the database rather than
+/// changing this code.
+///
+/// Scoped by `user_id` like every other read here, so search can never reach
+/// another person's mail.
+pub async fn search(
+    pool: &PgPool,
+    user_id: i64,
+    query: &str,
+    folder_id: Option<i64>,
+    cursor: Option<(chrono::DateTime<chrono::Utc>, i64)>,
+    limit: i64,
+) -> Result<Vec<SearchRow>> {
+    // The caller supplies a substring, not a pattern: % and _ are wildcards in
+    // LIKE, so a query containing them would silently mean something other than
+    // what was typed.
+    // The caller supplies a substring, not a pattern: % and _ are wildcards
+    // in LIKE, so a query containing either would silently mean something
+    // other than what was typed. '!' is the escape character rather than the
+    // usual backslash purely because it needs no escaping in a Rust literal,
+    // an SQL literal, or anything in between.
+    let escaped = query
+        .replace(char::from(33), "!!")
+        .replace(char::from(37), "!%")
+        .replace(char::from(95), "!_");
+    let pattern = format!("%{escaped}%");
+
+    let (before_date, before_uid) = match cursor {
+        Some((d, u)) => (Some(d), Some(u)),
+        None => (None, None),
+    };
+
+    let rows: Vec<SearchRow> = sqlx::query_as(
+        "SELECT p.uid,
+                p.seen,
+                m.blake3,
+                m.subject,
+                m.from_addr,
+                m.envelope->'from'->0->>'name' AS from_name,
+                m.internaldate,
+                m.size,
+                EXISTS (
+                    SELECT 1 FROM jsonb_array_elements(m.bodystructure->'parts') part
+                     WHERE (part->>'is_attachment')::boolean
+                ) AS has_attachments,
+                f.id,
+                a.label,
+                f.name,
+                a.hierarchy_delimiter
+           FROM placements p
+           JOIN messages m ON m.id = p.message_id
+           JOIN folders  f ON f.id = p.folder_id
+           JOIN accounts a ON a.id = f.account_id
+          WHERE a.user_id = $1
+            AND ($2::bigint IS NULL OR p.folder_id = $2)
+            AND (m.subject ILIKE $3 ESCAPE '!' OR m.from_addr ILIKE $3 ESCAPE '!')
+            AND ($4::timestamptz IS NULL OR (m.internaldate, p.uid) < ($4, $5))
+          ORDER BY m.internaldate DESC, p.uid DESC
+          LIMIT $6",
+    )
+    .bind(user_id)
+    .bind(folder_id)
+    .bind(&pattern)
+    .bind(before_date)
+    .bind(before_uid)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows)
+}
+
+/// A search result row. Extends `MessageRow` with where the message lives.
+#[derive(sqlx::FromRow)]
+pub struct SearchRow {
+    pub uid: i64,
+    pub seen: bool,
+    pub blake3: String,
+    pub subject: Option<String>,
+    pub from_addr: Option<String>,
+    pub from_name: Option<String>,
+    pub internaldate: chrono::DateTime<chrono::Utc>,
+    pub size: i64,
+    pub has_attachments: bool,
+    pub folder_id: i64,
+    pub account_label: String,
+    pub folder_name: String,
+    pub hierarchy_delimiter: Option<String>,
+}
+
 /// One user by id, for the web session endpoint.
 ///
 /// Separate from `authenticate` because the caller already holds a verified

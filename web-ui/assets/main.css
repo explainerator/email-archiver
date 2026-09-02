@@ -152,3 +152,15 @@ body {
   width: 100%; min-height: 60vh; border: 0;
   background: var(--bg); color-scheme: light dark;
 }
+
+/* Search */
+.shell header .search { display: flex; align-items: center; gap: .5rem; flex: 1; max-width: 26rem; }
+.shell header .search input {
+  flex: 1; padding: .3rem .55rem; font: inherit; font-size: .9rem;
+  border: 1px solid var(--line); border-radius: 4px;
+  background: var(--bg); color: var(--fg);
+}
+.shell header .search .link { margin-left: 0; }
+/* The folder a hit came from, trailing the subject rather than taking a column
+   of its own -- it is context, not a field worth aligning. */
+.list .infolder { color: var(--muted); font-size: .8rem; }
