@@ -1,6 +1,7 @@
 # archive-web — a browser client for the mail archive
 
-Status: **Phase 1 done** (listener + health + static hosting); phases 2-7 outstanding.
+Status: **Phases 1-2 done** (listener, health, static hosting, authentication);
+phases 3-7 outstanding.
 Companion to `ARCHIVE-PLAN.md`, which stays the authority on storage, ingest and IMAP.
 
 ---
@@ -526,7 +527,7 @@ deployer: one binary, one upload, two units.
 | Phase | Work | Gate |
 |---|---|---|
 | **1** | ✅ `serve-web`: axum, static assets, `127.0.0.1:8000` plaintext | Done — `/api/health` reports database reachability; unknown API routes 404 rather than returning index.html; non-loopback plaintext refused; IMAP unaffected (35 tests) |
-| **2** | Login, session cookie, `UserScope` | No data reachable unauthenticated |
+| **2** | ✅ Login, session cookie, `UserScope`, login throttle | Done — `/api/session` 401s without a valid cookie; forged and expired cookies rejected; unknown-user and wrong-password responses byte-identical; throttle engages on the 10th failure |
 | **3** | Folder pane + message list, keyset pagination | Browse the 53k INBOX without a slow page |
 | **4a** | Reading pane, **plain text only** | Message bodies readable |
 | **4b** | Sanitised HTML (§6) | A known-hostile message renders inert |
@@ -555,6 +556,11 @@ change, and is the assumption above.
 **Q3 — Folder presentation.** Thunderbird shows the raw namespaced path (`work/INBOX`).
 The web client could group by account instead. Cosmetic, but decide before Phase 3.
 
-**Q4 — Session signing key.** Generate alongside `encryption_key` and deliver via
-Terraform, or derive from it? Deriving means one secret to protect; separate means
-invalidating sessions never touches stored passwords. *Leaning separate.*
+**Q4 — RESOLVED: derived, not separate.** The plan leaned toward a second secret so that
+invalidating sessions would not touch stored passwords. Deriving turns out to win on both
+counts: `blake3::derive_key` with a versioned context string
+(`session::KEY_CONTEXT`) gives independent session invalidation by bumping the version in
+code, and a second secret would be another value to generate, deliver through Terraform,
+and lose. There is no added exposure either — if `encryption_key` leaks, stored
+source-mailbox passwords are readable, and forged session cookies are not the marginal
+harm at that point.

@@ -460,6 +460,25 @@ pub async fn authenticate(
     })
 }
 
+/// One user by id, for the web session endpoint.
+///
+/// Separate from `authenticate` because the caller already holds a verified
+/// session and is asking "who is this", not "is this password right".
+pub async fn user_by_id(pool: &PgPool, user_id: i64) -> Result<Option<(String, String)>> {
+    let row: Option<(String, Option<String>)> =
+        sqlx::query_as("SELECT login, display_name FROM users WHERE id = $1")
+            .bind(user_id)
+            .fetch_optional(pool)
+            .await?;
+
+    // display_name is nullable; falling back to the login keeps the API's shape
+    // stable so the client never has to handle a missing name.
+    Ok(row.map(|(login, display)| {
+        let display = display.unwrap_or_else(|| login.clone());
+        (login, display)
+    }))
+}
+
 pub async fn set_hierarchy_delimiter(
     pool: &PgPool,
     account_id: i64,
