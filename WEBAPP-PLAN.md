@@ -457,9 +457,28 @@ messages you can only page through is close to useless.
    Slower than an indexed search would be, and it degrades linearly with the corpus, but
    usable — and it needs no migration, which removes that failure mode entirely.
 
-   If it does become annoying, the fix is enabling the extension **on the database**
-   (OVH's control panel is the place to look) rather than changing this code: the query is
-   already written so an index would simply be used.
+   **"Why not just index the table?"** Three answers, in the order they were tried:
+
+   * A **btree** cannot serve `ILIKE '%term%'`. B-trees are ordered, so they help only
+     when a prefix is known; a leading wildcard leaves nothing to seek on.
+   * **Core full-text search** (`tsvector` + GIN) needs no extension and *does* index —
+     but measured **slower**: 1.2 s against 610 ms. The index was never used. The query
+     drove from `placements`, doing 152,741 primary-key lookups into `messages` and
+     testing the predicate on each, so the only effect of the index was to add a
+     `to_tsvector` computation per row.
+   * **The query shape was the actual lever.** Filtering `messages` first — a
+     `MATERIALIZED` CTE, so Postgres cannot inline it back into the join — scans 151,518
+     rows once and hash-joins the ~3,000 survivors: **266 ms, down from 610 ms, with no
+     index at all.** That is what shipped.
+
+   The planner will not pick this on its own: it estimates `rows=19` for the join path
+   against an actual 3,139, so it believes the nested loop is nearly free. Hence the shape
+   is pinned in the SQL rather than left to the optimiser.
+
+   pg_trgm would still help on top of this, by turning the remaining 191 ms sequential
+   scan into an index lookup. If search ever becomes annoying, enabling the extension
+   **on the database** (OVH's control panel is the place to look) is the fix, not a code
+   change — the predicate is already written so an index would simply be used.
 
 2. **Full text over bodies**, only if 1 proves insufficient. Needs body text extracted at
    ingest into a `tsvector`, a backfill across every archived message, and real storage.

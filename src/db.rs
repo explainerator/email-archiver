@@ -681,30 +681,56 @@ pub async fn search(
         None => (None, None),
     };
 
+    // WHY A CTE. Written as a plain join, Postgres drives from `placements` --
+    // 152,741 primary-key lookups into `messages`, testing the text predicate on
+    // each. Measured at 610 ms. Filtering `messages` first instead, which
+    // MATERIALIZED forces by stopping the CTE being inlined back into the join,
+    // scans 151,518 rows once and hash-joins the ~3,000 survivors: 266 ms.
+    //
+    // The planner will not choose this on its own. Its estimate for the join
+    // path is rows=19 against an actual 3,139, so it believes the nested loop is
+    // nearly free. That is why the shape is pinned here rather than left open.
+    //
+    // No index is involved, and adding one would not have helped: a btree cannot
+    // serve a leading-wildcard LIKE, and a GIN full-text index measured SLOWER
+    // (1.2 s) because the planner still drove from placements and recomputed
+    // to_tsvector per row. See WEBAPP-PLAN.md 8.
     let rows: Vec<SearchRow> = sqlx::query_as(
-        "SELECT p.uid,
+        "WITH matched AS MATERIALIZED (
+             SELECT id,
+                    blake3,
+                    subject,
+                    from_addr,
+                    envelope->'from'->0->>'name' AS from_name,
+                    internaldate,
+                    size,
+                    EXISTS (
+                        SELECT 1 FROM jsonb_array_elements(bodystructure->'parts') part
+                         WHERE (part->>'is_attachment')::boolean
+                    ) AS has_attachments
+               FROM messages
+              WHERE user_id = $1
+                AND (subject ILIKE $3 ESCAPE '!' OR from_addr ILIKE $3 ESCAPE '!')
+         )
+         SELECT p.uid,
                 p.seen,
                 m.blake3,
                 m.subject,
                 m.from_addr,
-                m.envelope->'from'->0->>'name' AS from_name,
+                m.from_name,
                 m.internaldate,
                 m.size,
-                EXISTS (
-                    SELECT 1 FROM jsonb_array_elements(m.bodystructure->'parts') part
-                     WHERE (part->>'is_attachment')::boolean
-                ) AS has_attachments,
+                m.has_attachments,
                 f.id,
                 a.label,
                 f.name,
                 a.hierarchy_delimiter
-           FROM placements p
-           JOIN messages m ON m.id = p.message_id
-           JOIN folders  f ON f.id = p.folder_id
-           JOIN accounts a ON a.id = f.account_id
+           FROM matched m
+           JOIN placements p ON p.message_id = m.id
+           JOIN folders    f ON f.id = p.folder_id
+           JOIN accounts   a ON a.id = f.account_id
           WHERE a.user_id = $1
             AND ($2::bigint IS NULL OR p.folder_id = $2)
-            AND (m.subject ILIKE $3 ESCAPE '!' OR m.from_addr ILIKE $3 ESCAPE '!')
             AND ($4::timestamptz IS NULL OR (m.internaldate, p.uid) < ($4, $5))
           ORDER BY m.internaldate DESC, p.uid DESC
           LIMIT $6",
