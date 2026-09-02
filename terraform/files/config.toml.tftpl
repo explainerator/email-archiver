@@ -32,3 +32,19 @@ access_key = "${creds.access_key}"
 secret_key = "${creds.secret_key}"
 
 %{ endfor ~}
+
+# ----------------------------------------------------------------------------
+# Source mailboxes, keyed by address.
+#
+# Postgres is authoritative for which accounts exist (accounts.address); this
+# only says how to authenticate to one. An account in the database with no
+# entry here is simply not ingested, and the error says so.
+# ----------------------------------------------------------------------------
+%{ for address, src in sources ~}
+[sources."${address}"]
+host     = "${src.host}"
+port     = ${src.port}
+username = "${src.username}"
+password = "${src.password}"
+
+%{ endfor ~}

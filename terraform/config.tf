@@ -29,10 +29,38 @@ variable "database_url" {
   }
 }
 
+variable "source_accounts" {
+  description = <<-EOT
+    How to log in to each SOURCE mailbox being archived, keyed by address.
+    Contains passwords, so set it in secrets.tfvars.
+
+    Postgres remains authoritative for which accounts exist (accounts.address);
+    this only says how to authenticate to one.
+
+    source_accounts = {
+      "ken@twoducks.ca" = {
+        host     = "mail.example.com"
+        port     = 993
+        username = "ken@twoducks.ca"
+        password = "..."
+      }
+    }
+  EOT
+  type = map(object({
+    host     = string
+    port     = optional(number, 993)
+    username = string
+    password = string
+  }))
+  sensitive = true
+  default   = {}
+}
+
 locals {
   archiver_config = templatefile("${path.module}/files/config.toml.tftpl", {
     database_url = var.database_url
     s3_endpoint  = "https://s3.${lower(var.storage_region)}.io.cloud.ovh.net"
+    sources      = var.source_accounts
     s3_region    = lower(var.storage_region)
 
     # bucket -> credentials. Keyed by bucket to match how the archiver looks

@@ -14,7 +14,7 @@ sqlx = { version = "0.8", default-features = false, features = [
     "migrate",
     "macros",
 ] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 anyhow = "1"
@@ -23,3 +23,8 @@ aws-sdk-s3 = "1.144.0"
 blake3 = "1.8.7"
 serde_json = "1.0.151"
 chrono = "0.4.45"
+mail-parser = "0.11.8"
+futures = "0.3.34"
+async-imap = { version = "0.11.3", default-features = false, features = ["runtime-tokio"] }
+tokio-rustls = "0.26.4"
+webpki-roots = "1.0.9"

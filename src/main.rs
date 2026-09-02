@@ -4,6 +4,9 @@
 //! See ARCHIVE-PLAN.md for the design and phasing.
 
 mod config;
+mod db;
+mod envelope;
+mod ingest;
 mod store;
 
 use anyhow::{Context, Result};
@@ -27,6 +30,17 @@ USAGE:
     email-archiver migrate
         Apply database migrations to the `archive` database.
 
+    email-archiver add-user <login> <bucket> [display name]
+        Register an archive user and the S3 bucket they own.
+
+    email-archiver add-account <login> <address> <label> <imap|gmail>
+        Register a source mailbox feeding that user's archive. <label> becomes
+        the IMAP namespace prefix, e.g. work -> work/INBOX.
+
+    email-archiver ingest <address>
+        Pull mail from one source mailbox. Resumable: re-running continues
+        from where it stopped.
+
 Configuration is read from $EMAIL_ARCHIVER_CONFIG, else /etc/email-archiver/config.toml.
 Generate it with: cd terraform && terraform output -raw archiver_config > config.toml
 ";
@@ -39,6 +53,32 @@ async fn main() -> Result<()> {
     match args.first().map(String::as_str) {
         Some("migrate") => migrate(&config).await,
 
+        Some("add-user") => {
+            let (login, bucket) = (arg(&args, 1, "login")?, arg(&args, 2, "bucket")?);
+            let display = args.get(3).cloned().unwrap_or_else(|| login.clone());
+            let pool = connect_db(&config).await?;
+            let id = db::create_user(&pool, &login, &bucket, &display).await?;
+            println!("user {login} (id {id}) -> bucket {bucket}");
+            Ok(())
+        }
+
+        Some("add-account") => {
+            let login = arg(&args, 1, "login")?;
+            let address = arg(&args, 2, "address")?;
+            let label = arg(&args, 3, "label")?;
+            let provider = arg(&args, 4, "provider (imap|gmail)")?;
+            let pool = connect_db(&config).await?;
+            let id = db::create_account(&pool, &login, &address, &label, &provider).await?;
+            println!("account {address} (id {id}) -> user {login}, namespace {label}/");
+            Ok(())
+        }
+
+        Some("ingest") => {
+            let address = arg(&args, 1, "address")?;
+            let pool = connect_db(&config).await?;
+            ingest::run(&config, &pool, &address).await
+        }
+
         _ => {
             print!("{USAGE}");
             Ok(())
@@ -46,9 +86,17 @@ async fn main() -> Result<()> {
     }
 }
 
-async fn migrate(config: &Config) -> Result<()> {
-    println!("loaded {config:?}");
+fn arg(args: &[String], index: usize, name: &str) -> Result<String> {
+    args.get(index)
+        .cloned()
+        .with_context(|| format!("missing argument <{name}>\n\n{USAGE}"))
+}
 
+/// Connect, and refuse to proceed unless this really is the archive database.
+///
+/// The cluster also hosts the game services' `defaultdb`. Every command goes
+/// through here so that guard cannot be forgotten by a new subcommand.
+async fn connect_db(config: &Config) -> Result<sqlx::PgPool> {
     let pool = PgPoolOptions::new()
         .max_connections(MAX_CONNECTIONS)
         .connect(&config.database.url)
@@ -61,8 +109,15 @@ async fn migrate(config: &Config) -> Result<()> {
     anyhow::ensure!(
         database == EXPECTED_DATABASE,
         "connected to database {database:?}, expected {EXPECTED_DATABASE:?}. \
-         Refusing to migrate — this cluster also hosts the game services' `defaultdb`."
+         Refusing to continue — this cluster also hosts the game services' `defaultdb`."
     );
+    Ok(pool)
+}
+
+async fn migrate(config: &Config) -> Result<()> {
+    println!("loaded {config:?}");
+    let pool = connect_db(config).await?;
+    let database = EXPECTED_DATABASE;
 
     sqlx::migrate!("./migrations")
         .run(&pool)

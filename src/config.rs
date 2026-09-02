@@ -30,6 +30,30 @@ const PATH_ENV: &str = "EMAIL_ARCHIVER_CONFIG";
 pub struct Config {
     pub database: Database,
     pub s3: S3,
+    /// Source mailboxes to ingest from, keyed by address.
+    ///
+    /// Same split as `s3.credentials`: Postgres is authoritative for which
+    /// accounts exist (`accounts.address`); this only says how to log in to
+    /// one. An account in the database with no entry here simply is not
+    /// ingested, and says so.
+    #[serde(default)]
+    pub sources: HashMap<String, Source>,
+}
+
+/// How to reach one source mailbox.
+#[derive(Deserialize)]
+pub struct Source {
+    pub host: String,
+    #[serde(default = "default_imaps_port")]
+    pub port: u16,
+    pub username: String,
+    /// Password or app password. Gmail (XOAUTH2) is not supported yet — see
+    /// ARCHIVE-PLAN.md 3.3; the generic-IMAP accounts come first deliberately.
+    pub password: String,
+}
+
+fn default_imaps_port() -> u16 {
+    993
 }
 
 #[derive(Deserialize)]
@@ -82,6 +106,19 @@ impl Config {
         Ok(())
     }
 
+    /// How to log in to a source mailbox, by address.
+    ///
+    /// Reached via `accounts.address`, so a miss means the database knows about
+    /// an account the config has no credentials for.
+    pub fn source(&self, address: &str) -> Result<&Source> {
+        self.sources.get(address).with_context(|| {
+            format!(
+                "no source credentials configured for {address:?}. \
+                 Add it to `source_accounts` in secrets.tfvars and re-run `terraform apply`."
+            )
+        })
+    }
+
     /// Credentials for a bucket, with an error that names the likely cause.
     ///
     /// Reached via `users.bucket`, so a miss means the database and the
@@ -106,6 +143,18 @@ impl fmt::Debug for Config {
             .field("s3.endpoint", &self.s3.endpoint)
             .field("s3.region", &self.s3.region)
             .field("s3.buckets", &self.s3.credentials.keys().collect::<Vec<_>>())
+            .field("sources", &self.sources.keys().collect::<Vec<_>>())
+            .finish()
+    }
+}
+
+impl fmt::Debug for Source {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Source")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("username", &self.username)
+            .field("password", &"<redacted>")
             .finish()
     }
 }
