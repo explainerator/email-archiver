@@ -29,6 +29,7 @@ use tokio::net::{TcpListener, TcpStream};
 
 use crate::config::Config;
 use crate::fetch as fetchlib;
+use crate::naming;
 use crate::store::Store;
 
 /// Everything the connection knows once a user has logged in.
@@ -374,8 +375,8 @@ async fn handle(
 /// Namespaced by account because one archive user may hold several source
 /// mailboxes, each with its own INBOX — they cannot all be called INBOX.
 async fn folders_for(pool: &PgPool, user_id: i64) -> Result<Vec<(i64, String)>> {
-    let rows: Vec<(i64, String, String)> = sqlx::query_as(
-        "SELECT f.id, a.label, f.name
+    let rows: Vec<(i64, String, String, Option<String>)> = sqlx::query_as(
+        "SELECT f.id, a.label, f.name, a.hierarchy_delimiter
          FROM folders f JOIN accounts a ON a.id = f.account_id
          WHERE a.user_id = $1
          ORDER BY a.label, f.name",
@@ -385,7 +386,10 @@ async fn folders_for(pool: &PgPool, user_id: i64) -> Result<Vec<(i64, String)>> 
     .await?;
     Ok(rows
         .into_iter()
-        .map(|(id, label, name)| (id, format!("{label}/{name}")))
+        .map(|(id, label, name, delim)| {
+            let shown = naming::to_display(&name, delim.and_then(|d| d.chars().next()));
+            (id, format!("{label}/{shown}"))
+        })
         .collect())
 }
 
@@ -518,13 +522,30 @@ async fn folder_meta(
     user_id: i64,
     display_name: &str,
 ) -> Result<Option<(i64, i64, i64, i64)>> {
+    // Translate back to the source name before looking up. The stored name is
+    // whatever the source called it; only the presentation uses our delimiter.
+    let (label, rest) = match display_name.split_once('/') {
+        Some(parts) => parts,
+        None => return Ok(None),
+    };
+
+    let delim: Option<String> =
+        sqlx::query_scalar("SELECT hierarchy_delimiter FROM accounts WHERE user_id = $1 AND label = $2")
+            .bind(user_id)
+            .bind(label)
+            .fetch_optional(pool)
+            .await?
+            .flatten();
+    let source_name = naming::from_display(rest, delim.and_then(|d| d.chars().next()));
+
     let row: Option<(i64, i64, i64)> = sqlx::query_as(
         "SELECT f.id, f.uidvalidity, f.uidnext
          FROM folders f JOIN accounts a ON a.id = f.account_id
-         WHERE a.user_id = $1 AND (a.label || '/' || f.name) = $2",
+         WHERE a.user_id = $1 AND a.label = $2 AND f.name = $3",
     )
     .bind(user_id)
-    .bind(display_name)
+    .bind(label)
+    .bind(&source_name)
     .fetch_optional(pool)
     .await?;
 

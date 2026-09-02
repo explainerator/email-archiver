@@ -9,6 +9,7 @@ mod db;
 mod envelope;
 mod fetch;
 mod ingest;
+mod naming;
 mod server;
 mod store;
 

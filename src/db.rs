@@ -353,6 +353,23 @@ pub async fn messages_missing_headers(pool: &PgPool, user_id: i64) -> Result<Vec
     .await?)
 }
 
+/// Record the hierarchy delimiter the source server reported.
+///
+/// Written on every ingest rather than once, so a server that changes its
+/// layout is picked up rather than remembered wrongly.
+pub async fn set_hierarchy_delimiter(
+    pool: &PgPool,
+    account_id: i64,
+    delimiter: Option<char>,
+) -> Result<()> {
+    sqlx::query("UPDATE accounts SET hierarchy_delimiter = $2 WHERE id = $1")
+        .bind(account_id)
+        .bind(delimiter.map(|c| c.to_string()))
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 pub async fn set_headers(pool: &PgPool, user_id: i64, blake3: &str, headers: &[u8]) -> Result<()> {
     sqlx::query("UPDATE messages SET headers = $3 WHERE user_id = $1 AND blake3 = $2")
         .bind(user_id)

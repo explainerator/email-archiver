@@ -211,6 +211,7 @@ pub async fn run(config: &Config, pool: &PgPool, address: &str) -> Result<()> {
 
     // Collect names first: the session cannot be used for anything else while
     // the LIST stream is borrowed from it.
+    let mut delimiter: Option<char> = None;
     let folders: Vec<String> = {
         let mut listing = session.list(Some(""), Some("*")).await?;
         let mut names = Vec::new();
@@ -222,10 +223,19 @@ pub async fn run(config: &Config, pool: &PgPool, address: &str) -> Result<()> {
             }) {
                 continue;
             }
+            // The source tells us its hierarchy separator; we previously
+            // discarded it. Without it, presenting Archives.qra.2014 as a tree
+            // would be guesswork — and wrong for servers that use "/".
+            if delimiter.is_none() {
+                delimiter = item.delimiter().and_then(|d| d.chars().next());
+            }
             names.push(item.name().to_string());
         }
         names
     };
+
+    db::set_hierarchy_delimiter(pool, account.id, delimiter).await?;
+    println!("  source hierarchy delimiter: {delimiter:?}");
 
     println!(
         "  {} selectable folders, concurrency {}",
