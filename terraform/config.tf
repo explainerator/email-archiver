@@ -41,6 +41,18 @@ variable "database_max_connections" {
   default     = 8
 }
 
+variable "tls_cert_path" {
+  description = "Full-chain certificate on the instance, e.g. /etc/letsencrypt/live/archive.thebackroom420.ca/fullchain.pem. Empty serves plaintext, which is only permitted on loopback."
+  type        = string
+  default     = ""
+}
+
+variable "tls_key_path" {
+  description = "Private key on the instance, e.g. /etc/letsencrypt/live/archive.thebackroom420.ca/privkey.pem."
+  type        = string
+  default     = ""
+}
+
 variable "encryption_key" {
   description = <<-EOT
     Base64 32-byte key encrypting source mailbox passwords in the database.
@@ -63,6 +75,8 @@ locals {
     database_url   = var.database_url
     s3_endpoint    = "https://s3.${lower(var.storage_region)}.io.cloud.ovh.net"
     encryption_key = var.encryption_key
+    tls_cert_path  = var.tls_cert_path
+    tls_key_path   = var.tls_key_path
 
     ingest_concurrency       = var.ingest_concurrency
     database_max_connections = var.database_max_connections

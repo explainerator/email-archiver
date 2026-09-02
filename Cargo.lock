@@ -1138,6 +1138,7 @@ dependencies = [
  "imap-next",
  "mail-parser",
  "rand",
+ "rustls-pemfile",
  "serde",
  "serde_json",
  "sqlx",
@@ -2519,6 +2520,15 @@ dependencies = [
  "rustls-pki-types",
  "schannel",
  "security-framework",
+]
+
+[[package]]
+name = "rustls-pemfile"
+version = "2.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dce314e5fee3f39953d46bb63bb8a46d40c2f8fb7cc5a3b6cab2bde9721d6e50"
+dependencies = [
+ "rustls-pki-types",
 ]
 
 [[package]]
@@ -3911,11 +3921,7 @@ name = "telemetry"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "message_types"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "auth-service-webapp-client"
+name = "message_client"
 version = "0.1.0"
 
 [[patch.unused]]
@@ -3923,11 +3929,15 @@ name = "message-protocol"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "gerns_utilities"
+name = "config"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "message_client"
+name = "auth-service-webapp-client"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "gerns_utilities"
 version = "0.1.0"
 
 [[patch.unused]]
@@ -3935,9 +3945,9 @@ name = "message-broker-common"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "map-common"
+name = "message_types"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "config"
+name = "map-common"
 version = "0.1.0"

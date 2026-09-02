@@ -14,6 +14,7 @@ mod naming;
 mod secrets;
 mod server;
 mod store;
+mod tls;
 
 use anyhow::{Context, Result};
 use config::Config;
@@ -60,8 +61,9 @@ USAGE:
         manifests are missing, or were written under an older key scheme.
 
     email-archiver serve [bind]
-        Read-only IMAP server (Phase 4 spike). Default 127.0.0.1:1143.
-        Plaintext, loopback only, ANY password accepted — not a service yet.
+        Read-only IMAP server. Default 127.0.0.1:1143.
+        Serves TLS when tls.cert_path and tls.key_path are set; refuses to bind
+        a non-loopback address without them, since IMAP LOGIN is plaintext.
 
     email-archiver backfill-headers <login>
         Cache header blocks for messages archived before that column existed.

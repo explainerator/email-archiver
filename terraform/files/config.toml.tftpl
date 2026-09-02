@@ -44,3 +44,20 @@ access_key = "${creds.access_key}"
 secret_key = "${creds.secret_key}"
 
 %{ endfor ~}
+
+# ----------------------------------------------------------------------------
+# TLS for the IMAP listener.
+#
+# Certificates come from files rather than an in-process ACME client, so
+# certbot (or anything else) handles issuance and renewal on its own schedule
+# and this program only reads them. They are re-read when they change, so a
+# renewal is picked up without a restart.
+#
+# Leave unset to serve plaintext — which the server will only allow on
+# loopback, because IMAP LOGIN sends the password in the clear.
+# ----------------------------------------------------------------------------
+%{ if tls_cert_path != "" ~}
+[tls]
+cert_path = "${tls_cert_path}"
+key_path  = "${tls_key_path}"
+%{ endif ~}

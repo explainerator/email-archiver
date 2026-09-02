@@ -37,6 +37,36 @@ pub struct Config {
     pub encryption_key: String,
     #[serde(default)]
     pub ingest: Ingest,
+    #[serde(default)]
+    pub tls: Tls,
+}
+
+/// TLS for the IMAP listener.
+///
+/// Certificates come from files, not an in-process ACME client — certbot or
+/// similar writes them and renews on its own schedule. See src/tls.rs.
+#[derive(Deserialize, Default)]
+pub struct Tls {
+    /// Full-chain certificate, PEM. Absent means serve plaintext.
+    pub cert_path: Option<String>,
+    /// Private key, PEM.
+    pub key_path: Option<String>,
+}
+
+impl Tls {
+    /// Both paths, or neither. A half-configured TLS section is almost
+    /// certainly a mistake, and silently serving plaintext because one line was
+    /// missing is exactly the failure worth being loud about.
+    pub fn paths(&self) -> Result<Option<(&str, &str)>> {
+        match (&self.cert_path, &self.key_path) {
+            (Some(c), Some(k)) => Ok(Some((c.as_str(), k.as_str()))),
+            (None, None) => Ok(None),
+            _ => anyhow::bail!(
+                "tls.cert_path and tls.key_path must be set together — one without the \
+                 other would silently serve plaintext"
+            ),
+        }
+    }
 }
 
 /// How to reach one source mailbox. Loaded from the database, not config.

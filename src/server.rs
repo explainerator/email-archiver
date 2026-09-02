@@ -5,9 +5,14 @@
 //! as a server foundation before building on it, and to learn what Thunderbird
 //! actually asks for — every unhandled command is logged rather than guessed at.
 //!
-//! Passwords are verified against `users.password_hash` (Argon2id). **There is
-//! still no TLS**, so this must stay on loopback or behind a tunnel until that
-//! lands — a plaintext listener would put every password on the wire.
+//! Passwords are verified against `users.password_hash` (Argon2id), and the
+//! listener speaks TLS when a certificate is configured.
+//!
+//! **Without a certificate it serves plaintext**, which is fine on loopback and
+//! unacceptable anywhere else: IMAP LOGIN sends the password in the clear, so a
+//! plaintext listener on a public address hands it to anyone on the path. The
+//! server refuses to bind a non-loopback address without TLS rather than
+//! leaving that to be noticed later.
 //!
 //! Nothing here can mutate the archive: there is no APPEND, STORE, EXPUNGE or
 //! DELETE, and the only writes in the whole program are ingest and read-state.
@@ -25,9 +30,10 @@ use imap_next::server::{Options, Server};
 use imap_next::stream::Stream;
 use sqlx::PgPool;
 use std::sync::Arc;
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpListener;
 
 use crate::config::Config;
+use crate::tls::CertReloader;
 use crate::db;
 use crate::fetch as fetchlib;
 use crate::naming;
@@ -42,13 +48,30 @@ struct Session {
 }
 
 pub async fn run(config: &Arc<Config>, pool: &PgPool, bind: &str) -> Result<()> {
+    let tls = match config.tls.paths()? {
+        Some((cert, key)) => Some(Arc::new(CertReloader::new(cert, key)?)),
+        None => None,
+    };
+
+    // IMAP LOGIN puts the password on the wire in clear text. Serving plaintext
+    // on anything but loopback would hand every password to whoever is on the
+    // path, so that combination is refused rather than warned about.
+    if tls.is_none() && !is_loopback(bind) {
+        anyhow::bail!(
+            "refusing to serve plaintext on {bind}: IMAP sends passwords in clear text.\n\
+             Either bind 127.0.0.1, or set tls.cert_path and tls.key_path."
+        );
+    }
+
     let listener = TcpListener::bind(bind)
         .await
         .with_context(|| format!("binding {bind}"))?;
 
-    println!("IMAP spike listening on {bind}");
-    println!("  Plaintext; passwords are verified against users.password_hash.");
-    println!("  Set one with: email-archiver set-password <login>");
+    match &tls {
+        Some(_) => println!("IMAP listening on {bind} (TLS)"),
+        None => println!("IMAP listening on {bind} (PLAINTEXT, loopback only)"),
+    }
+    println!("  Passwords verified against users.password_hash.");
 
     loop {
         // A failed accept must not take down the listener: one bad connection
@@ -64,8 +87,24 @@ pub async fn run(config: &Arc<Config>, pool: &PgPool, bind: &str) -> Result<()> 
 
         let config = Arc::clone(config);
         let pool = pool.clone();
+        let tls = tls.clone();
         tokio::spawn(async move {
-            if let Err(e) = serve(&config, &pool, socket).await {
+            let result = match &tls {
+                Some(reloader) => match reloader.acceptor().await.accept(socket).await {
+                    // accept() yields the server-side struct; Stream::tls wants the
+                    // enum that covers both directions.
+                    Ok(stream) => {
+                        let stream = tokio_rustls::TlsStream::Server(stream);
+                        serve(&config, &pool, Stream::tls(stream)).await
+                    }
+                    Err(e) => {
+                        eprintln!("TLS handshake failed: {e}");
+                        return;
+                    }
+                },
+                None => serve(&config, &pool, Stream::insecure(socket)).await,
+            };
+            if let Err(e) = result {
                 eprintln!("connection error: {e:#}");
             }
             println!("--- disconnected ---");
@@ -73,8 +112,15 @@ pub async fn run(config: &Arc<Config>, pool: &PgPool, bind: &str) -> Result<()> 
     }
 }
 
-async fn serve(config: &Config, pool: &PgPool, socket: TcpStream) -> Result<()> {
-    let mut stream = Stream::insecure(socket);
+/// Only loopback may be served without TLS.
+fn is_loopback(bind: &str) -> bool {
+    bind.rsplit_once(':')
+        .and_then(|(host, _)| host.trim_matches(['[', ']']).parse::<std::net::IpAddr>().ok())
+        .map(|ip| ip.is_loopback())
+        .unwrap_or(false)
+}
+
+async fn serve(config: &Config, pool: &PgPool, mut stream: Stream) -> Result<()> {
     let greeting = Greeting::ok(None, "email-archiver (read-only archive)")
         .map_err(|e| anyhow::anyhow!("greeting: {e:?}"))?;
     let mut server = Server::new(Options::default(), greeting);
