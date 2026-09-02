@@ -192,6 +192,27 @@ sees (`work/INBOX`), split on the account's `hierarchy_delimiter`. Unread counts
 The archive-root INBOX is empty by construction and should be hidden here rather than
 shown as a permanently empty folder — it exists only because IMAP requires it.
 
+**A real tree, collapsed by default.** The archive has 46 folders four levels deep —
+`personal/Archives` alone has fifteen children — and a flat list of full paths was a wall
+of text. Collapsed, the pane opens showing two account rows.
+
+Three things the tree has to get right, all of them present in the real data:
+
+* **A node is not the same thing as a folder.** `personal/Archives` holds fifteen years of
+  mail in its children and nothing itself; `personal/INBOX` is both a 53,573-message folder
+  *and* a parent. A node's folder is therefore optional and independent of its children.
+* **Missing parents are invented.** `personal/Archives/qra/2014/Sent` exists where some
+  intermediate levels hold no mail, and a child must never be orphaned because the server
+  did not list its parent.
+* **Collapsed parents answer for their subtree.** `personal/Junk` has 3,971 unread and
+  `personal/Archives/2019` another 1,765. Hiding those behind a closed node would make the
+  tree actively misleading, so a collapsed node shows its descendants' total and an
+  expanded one shows only its own — its children are then on screen speaking for
+  themselves.
+
+Expansion state is keyed by full path, so two nodes sharing a path would open and close
+together; there is a test asserting uniqueness.
+
 ### 5.2 Message list
 
 Already indexed for this. `messages` carries `subject`, `from_addr` and `internaldate` as
