@@ -3,7 +3,7 @@
 //! Order of operations per message, and why it matters:
 //!
 //! 1. write the raw message to S3 (content-addressed)
-//! 2. write its manifest to S3
+//! 2. write its manifest to S3 (keyed by account + folder + uid)
 //! 3. insert the index rows into Postgres
 //! 4. advance the folder's resume marker
 //!
@@ -227,10 +227,12 @@ async fn store_message(
     )
     .await?;
 
-    let Some(uid) = db::place_message(pool, folder.id, message_id, seen).await? else {
-        return Ok(false); // already placed by an earlier run
-    };
+    let (uid, is_new) = db::place_message(pool, folder.id, message_id, source_uid as i64, seen).await?;
 
+    // Written unconditionally, even when the placement already existed. The
+    // manifest is derived data; rewriting it is cheap and makes a re-ingest
+    // repair manifests that are missing or were written under an older key
+    // scheme.
     store
         .put_manifest(&Manifest {
             account: account.address.clone(),
@@ -244,5 +246,5 @@ async fn store_message(
         })
         .await?;
 
-    Ok(true)
+    Ok(is_new)
 }

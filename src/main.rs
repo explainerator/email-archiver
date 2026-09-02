@@ -3,6 +3,7 @@
 //! Storage in S3 (one bucket per user), index in Postgres, IMAPS to clients.
 //! See ARCHIVE-PLAN.md for the design and phasing.
 
+mod check;
 mod config;
 mod db;
 mod envelope;
@@ -36,6 +37,13 @@ USAGE:
     email-archiver add-account <login> <address> <label> <imap|gmail>
         Register a source mailbox feeding that user's archive. <label> becomes
         the IMAP namespace prefix, e.g. work -> work/INBOX.
+
+    email-archiver check <login>
+        Verify Postgres and S3 agree for one user.
+
+    email-archiver rebuild-manifests <login>
+        Regenerate all S3 manifests for a user from the database. Use when
+        manifests are missing, or were written under an older key scheme.
 
     email-archiver ingest <address>
         Pull mail from one source mailbox. Resumable: re-running continues
@@ -78,6 +86,18 @@ async fn main() -> Result<()> {
             let id = db::create_account(&pool, &login, &address, &label, &provider).await?;
             println!("account {address} (id {id}) -> user {login}, namespace {label}/");
             Ok(())
+        }
+
+        Some("check") => {
+            let login = arg(&args, 1, "login")?;
+            let pool = connect_db(&config).await?;
+            check::run(&config, &pool, &login).await
+        }
+
+        Some("rebuild-manifests") => {
+            let login = arg(&args, 1, "login")?;
+            let pool = connect_db(&config).await?;
+            check::rebuild_manifests(&config, &pool, &login).await
         }
 
         Some("ingest") => {

@@ -4,7 +4,7 @@
 //!
 //! ```text
 //! messages/<blake3-hex>          the raw RFC 5322 bytes, content-addressed
-//! manifest/<account>/<uid>.json  sidecar describing where that message sits
+//! manifest/<account>/<folder>/<uid>.json   sidecar: where that message sits
 //! ```
 //!
 //! **The manifest is what makes the archive rebuildable.** Listing `manifest/`
@@ -89,8 +89,19 @@ impl Store {
         format!("messages/{hash}")
     }
 
-    pub fn manifest_key(account: &str, uid: i64) -> String {
-        format!("manifest/{account}/{uid}.json")
+    /// Manifest key. **Must include the folder**: IMAP UIDs are per-folder, so
+    /// every folder starts at 1 and keying on uid alone silently overwrites one
+    /// folder's manifests with another's.
+    ///
+    /// Segments are encoded because folder names may contain `/` (which would
+    /// otherwise forge a path) or `%`. Everything needed to rebuild the index
+    /// must be recoverable from the key itself.
+    pub fn manifest_key(account: &str, folder: &str, uid: i64) -> String {
+        format!(
+            "manifest/{}/{}/{uid}.json",
+            encode_segment(account),
+            encode_segment(folder)
+        )
     }
 
     /// Put an object at an arbitrary key. The primitive the rest builds on.
@@ -156,7 +167,7 @@ impl Store {
     /// leave a manifest pointing at a message that does not exist — which is
     /// indistinguishable from corruption during a rebuild.
     pub async fn put_manifest(&self, manifest: &Manifest) -> Result<()> {
-        let key = Self::manifest_key(&manifest.account, manifest.uid);
+        let key = Self::manifest_key(&manifest.account, &manifest.folder, manifest.uid);
         let body = serde_json::to_vec_pretty(manifest).context("serialising manifest")?;
 
         self.client
@@ -299,6 +310,11 @@ impl Store {
     }
 }
 
+/// Percent-encode the characters that would make a key ambiguous.
+fn encode_segment(s: &str) -> String {
+    s.replace('%', "%25").replace('/', "%2F")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -307,9 +323,25 @@ mod tests {
     fn keys_are_stable() {
         assert_eq!(Store::message_key("abc"), "messages/abc");
         assert_eq!(
-            Store::manifest_key("ken@twoducks.ca", 42),
-            "manifest/ken@twoducks.ca/42.json"
+            Store::manifest_key("ken@twoducks.ca", "INBOX", 42),
+            "manifest/ken@twoducks.ca/INBOX/42.json"
         );
+    }
+
+    #[test]
+    fn folders_do_not_collide_on_uid() {
+        // The bug this guards against: IMAP UIDs restart at 1 in every folder,
+        // so a key without the folder loses one folder's manifests entirely.
+        let a = Store::manifest_key("k@x.ca", "INBOX", 1);
+        let b = Store::manifest_key("k@x.ca", "INBOX.Trash", 1);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn folder_separators_cannot_forge_a_path() {
+        let odd = Store::manifest_key("k@x.ca", "weird/name", 1);
+        assert_eq!(odd, "manifest/k@x.ca/weird%2Fname/1.json");
+        assert_ne!(odd, Store::manifest_key("k@x.ca", "weird", 1).replace("/1", "/name/1"));
     }
 
     #[test]

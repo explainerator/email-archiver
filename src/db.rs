@@ -211,14 +211,17 @@ pub async fn upsert_message(
 
 /// Claim the next UID in a folder and place a message at it.
 ///
-/// Returns `None` if the message is already in this folder — a re-run must not
-/// create a second placement, or the message would appear twice.
+/// Returns `(uid, is_new)`. On a re-run the existing uid comes back with
+/// `is_new = false` rather than nothing: the caller still needs the uid so it
+/// can rewrite the manifest, which is what makes a re-ingest repair missing or
+/// wrongly-keyed manifests instead of silently leaving them broken.
 pub async fn place_message(
     pool: &PgPool,
     folder_id: i64,
     message_id: i64,
+    source_uid: i64,
     seen: bool,
-) -> Result<Option<i64>> {
+) -> Result<(i64, bool)> {
     let mut tx = pool.begin().await?;
 
     let already: Option<i64> =
@@ -227,9 +230,9 @@ pub async fn place_message(
             .bind(message_id)
             .fetch_optional(&mut *tx)
             .await?;
-    if already.is_some() {
+    if let Some(uid) = already {
         tx.rollback().await?;
-        return Ok(None);
+        return Ok((uid, false));
     }
 
     // Lock the folder row so two ingest passes cannot hand out the same UID.
@@ -240,16 +243,20 @@ pub async fn place_message(
     .fetch_one(&mut *tx)
     .await?;
 
-    sqlx::query("INSERT INTO placements (folder_id, uid, message_id, seen) VALUES ($1, $2, $3, $4)")
-        .bind(folder_id)
-        .bind(uid)
-        .bind(message_id)
-        .bind(seen)
-        .execute(&mut *tx)
-        .await?;
+    sqlx::query(
+        "INSERT INTO placements (folder_id, uid, message_id, source_uid, seen)
+         VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(folder_id)
+    .bind(uid)
+    .bind(message_id)
+    .bind(source_uid)
+    .bind(seen)
+    .execute(&mut *tx)
+    .await?;
 
     tx.commit().await?;
-    Ok(Some(uid))
+    Ok((uid, true))
 }
 
 /// Record ingest progress. Only ever moves forward.
@@ -260,4 +267,51 @@ pub async fn advance_source_uid(pool: &PgPool, folder_id: i64, source_uid: i64) 
         .execute(pool)
         .await?;
     Ok(())
+}
+
+/// Everything needed to regenerate one user's manifests from the index.
+///
+/// The mirror of a rebuild: manifests reconstruct the database after a
+/// disaster, and this reconstructs manifests when they drift or were written
+/// under an older key scheme.
+pub struct PlacementRow {
+    pub address: String,
+    pub folder: String,
+    pub uid: i64,
+    pub source_uid: Option<i64>,
+    pub internaldate: DateTime<Utc>,
+    pub seen: bool,
+    pub blake3: String,
+    pub size: i64,
+}
+
+pub async fn placements_for_user(pool: &PgPool, user_id: i64) -> Result<Vec<PlacementRow>> {
+    let rows: Vec<(String, String, i64, Option<i64>, DateTime<Utc>, bool, String, i64)> =
+        sqlx::query_as(
+            "SELECT a.address, f.name, p.uid, p.source_uid, m.internaldate, p.seen,
+                    m.blake3, m.size
+             FROM placements p
+             JOIN folders  f ON f.id = p.folder_id
+             JOIN accounts a ON a.id = f.account_id
+             JOIN messages m ON m.id = p.message_id
+             WHERE a.user_id = $1
+             ORDER BY a.address, f.name, p.uid",
+        )
+        .bind(user_id)
+        .fetch_all(pool)
+        .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|r| PlacementRow {
+            address: r.0,
+            folder: r.1,
+            uid: r.2,
+            source_uid: r.3,
+            internaldate: r.4,
+            seen: r.5,
+            blake3: r.6,
+            size: r.7,
+        })
+        .collect())
 }
