@@ -277,22 +277,40 @@ fn short_date(rfc3339: &str) -> &str {
 
 #[component]
 fn Reader(blake3: String) -> Element {
+    // Per message, not global: choosing to load one sender's images says
+    // nothing about the next message, and resets when a different one opens.
+    let mut remote = use_signal(|| false);
+
     let detail = use_resource(move || {
         let blake3 = blake3.clone();
-        async move { api::message(&blake3).await }
+        async move { api::message(&blake3, remote()).await }
     });
 
     rsx! {
         match &*detail.read_unchecked() {
             None => rsx! { p { class: "muted pad", "Loading…" } },
             Some(Err(e)) => rsx! { p { class: "error pad", "{e.message()}" } },
-            Some(Ok(message)) => rsx! { MessageView { message: message.clone() } },
+            Some(Ok(message)) => rsx! {
+                MessageView {
+                    message: message.clone(),
+                    remote_loaded: remote(),
+                    onload_remote: move |_| remote.set(true),
+                }
+            },
         }
     }
 }
 
 #[component]
-fn MessageView(message: MessageDetail) -> Element {
+fn MessageView(
+    message: MessageDetail,
+    remote_loaded: bool,
+    onload_remote: EventHandler<()>,
+) -> Element {
+    // Plain text is the default view even when HTML exists: it is the sender's
+    // own fallback, it renders identically everywhere, and it carries none of
+    // the risk. Switching to HTML is a deliberate act.
+    let mut show_html = use_signal(|| false);
     rsx! {
         article { class: "message",
             header {
@@ -327,19 +345,66 @@ fn MessageView(message: MessageDetail) -> Element {
                 }
             }
 
-            match &message.text {
-                Some(text) => rsx! { pre { class: "body", "{text}" } },
-                None if message.has_html => rsx! {
-                    p { class: "muted pad",
-                        "This message has no plain-text version. Rendering HTML safely is still to come."
-                    }
-                },
-                None => rsx! { p { class: "muted pad", "This message has no readable body." } },
-            }
+            // An HTML-only message has nothing else to show, so it starts on
+            // the HTML view rather than an empty pane.
+            {
+                let html_only = message.text.is_none() && message.html.is_some();
+                let showing_html = show_html() || html_only;
 
-            if message.text.is_some() && message.has_html {
-                p { class: "muted pad note",
-                    "Showing the plain-text version. An HTML version exists."
+                rsx! {
+                    if message.html.is_some() && message.text.is_some() {
+                        div { class: "viewswitch",
+                            button {
+                                class: if showing_html { "" } else { "on" },
+                                onclick: move |_| show_html.set(false),
+                                "Plain text"
+                            }
+                            button {
+                                class: if showing_html { "on" } else { "" },
+                                onclick: move |_| show_html.set(true),
+                                "HTML"
+                            }
+                        }
+                    }
+
+                    if showing_html {
+                        if message.blocked_images > 0 && !remote_loaded {
+                            div { class: "blocked",
+                                span {
+                                    "{message.blocked_images} remote image(s) blocked. "
+                                    "Loading them tells the sender you opened this."
+                                }
+                                button { onclick: move |_| onload_remote.call(()), "Load images" }
+                            }
+                        }
+                        // srcdoc + sandbox WITHOUT allow-scripts or
+                        // allow-same-origin: the frame gets an opaque origin, so
+                        // even markup that survived the sanitiser cannot run,
+                        // reach the session cookie, or touch the DOM around it.
+                        // The document carries its own CSP as well.
+                        iframe {
+                            class: "htmlframe",
+                            // Written as string-literal attributes because
+                            // Dioxus's iframe element does not define them.
+                            // sandbox="" is the MOST restrictive value: every
+                            // capability is withheld, including scripts and
+                            // same-origin. Do not add allow-scripts or
+                            // allow-same-origin here -- either one undoes the
+                            // second layer of WEBAPP-PLAN.md 6.5 and would let
+                            // surviving markup reach the session cookie.
+                            "sandbox": "",
+                            "srcdoc": "{message.html.clone().unwrap_or_default()}",
+                            "referrerpolicy": "no-referrer",
+                            title: "Message body",
+                        }
+                    } else {
+                        match &message.text {
+                            Some(text) => rsx! { pre { class: "body", "{text}" } },
+                            None => rsx! {
+                                p { class: "muted pad", "This message has no readable body." }
+                            },
+                        }
+                    }
                 }
             }
         }

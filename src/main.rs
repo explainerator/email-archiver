@@ -13,6 +13,7 @@ mod ingest;
 mod listen;
 mod naming;
 mod ratelimit;
+mod sanitise;
 mod secrets;
 mod server;
 mod session;

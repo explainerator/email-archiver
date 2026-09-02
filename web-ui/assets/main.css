@@ -109,3 +109,27 @@ body {
   white-space: pre-wrap; overflow-wrap: anywhere;
 }
 .note { border-top: 1px solid var(--line); margin-top: 1rem; font-size: .85rem; }
+
+/* HTML body view */
+.viewswitch { display: flex; gap: .25rem; margin: 1rem 0 .5rem; }
+.viewswitch button {
+  padding: .2rem .6rem; border: 1px solid var(--line); border-radius: 4px;
+  background: none; color: var(--muted); font: inherit; font-size: .8rem;
+  cursor: pointer;
+}
+.viewswitch button.on { color: var(--fg); border-color: var(--accent); }
+.blocked {
+  display: flex; gap: .75rem; align-items: center; flex-wrap: wrap;
+  padding: .5rem .75rem; margin-bottom: .5rem; font-size: .85rem;
+  border: 1px solid var(--line); border-radius: 4px;
+}
+.blocked button {
+  padding: .2rem .6rem; border: 1px solid var(--accent); border-radius: 4px;
+  background: none; color: var(--accent); font: inherit; cursor: pointer;
+}
+/* The frame is a separate document; it cannot inherit our styles, and must not
+   be given a transparent background that lets page content show through. */
+.htmlframe {
+  width: 100%; min-height: 60vh; border: 0;
+  background: var(--bg); color-scheme: light dark;
+}

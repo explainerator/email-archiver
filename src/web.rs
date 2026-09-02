@@ -38,6 +38,7 @@ use crate::db;
 use crate::listen;
 use crate::naming;
 use crate::ratelimit::Limiter;
+use crate::sanitise;
 use crate::session::{self, UserScope};
 use crate::store::Store;
 
@@ -156,6 +157,7 @@ fn router(state: AppState, assets: Option<PathBuf>) -> Result<Router> {
         .route("/folders", get(folders))
         .route("/folders/{id}/messages", get(messages))
         .route("/messages/{blake3}", get(message))
+        .route("/messages/{blake3}/inline/{cid}", get(inline_part))
         // The API needs its OWN fallback. `nest` does not isolate 404s: an
         // unmatched path under /api falls through to the outer fallback, which
         // is the SPA shell -- so without this, a misspelled endpoint answers
@@ -631,6 +633,31 @@ mod tests {
     }
 
     #[test]
+    fn images_are_identified_by_their_bytes() {
+        assert_eq!(
+            sniff_image(&[0x89, 80, 78, 71, 13, 10, 26, 10, 0]),
+            Some("image/png")
+        );
+        assert_eq!(sniff_image(&[0xFF, 0xD8, 0xFF, 0xE0]), Some("image/jpeg"));
+        assert_eq!(sniff_image(b"GIF89a...."), Some("image/gif"));
+        assert_eq!(sniff_image(b"RIFF____WEBPVP8 "), Some("image/webp"));
+    }
+
+    #[test]
+    fn a_declared_type_cannot_smuggle_a_document() {
+        // The whole point of sniffing. A part claiming image/png but containing
+        // HTML must not be served -- as a same-origin document it would be
+        // script execution, and the sandbox does not cover a direct URL fetch.
+        assert_eq!(sniff_image(b"<html><script>alert(1)</script>"), None);
+        assert_eq!(sniff_image(b"<!doctype html>"), None);
+        assert_eq!(sniff_image(b"%PDF-1.7"), None);
+        assert_eq!(sniff_image(b""), None);
+        // Truncated magic must not be accepted on a prefix match.
+        assert_eq!(sniff_image(&[0x89, 80]), None);
+        assert_eq!(sniff_image(b"RIFF____"), None);
+    }
+
+    #[test]
     fn page_size_is_capped() {
         // limit is user input; uncapped it would pull a whole 53k folder into
         // memory in one request.
@@ -647,10 +674,21 @@ mod tests {
 /// exists without shipping it -- rendering that safely needs the sanitiser,
 /// sandbox and CSP of WEBAPP-PLAN.md 6, which is phase 4b. Saying so is better
 /// than silently showing an empty pane for an HTML-only message.
+#[derive(Deserialize)]
+struct MessageQuery {
+    /// `images=remote` opts in to loading remote images for THIS request.
+    ///
+    /// A per-request choice rather than a stored preference: consenting to be
+    /// tracked by one sender is not consent for every sender, and a persisted
+    /// setting would quietly apply to messages the reader has not seen yet.
+    images: Option<String>,
+}
+
 async fn message(
     State(state): State<AppState>,
     scope: UserScope,
     Path(blake3): Path<String>,
+    Query(q): Query<MessageQuery>,
 ) -> Response {
     // Reject a malformed address before it reaches the database or S3. The
     // value is user-supplied and ends up in an object key.
@@ -702,8 +740,20 @@ async fn message(
             .into_response();
     };
 
+    let allow_remote = q.images.as_deref() == Some("remote");
+    let sanitised = parsed.body_html(0).map(|raw| {
+        // cid: references are rewritten onto this message's own parts, which is
+        // what lets the frame policy be img-src 'self' rather than allowing
+        // arbitrary remote hosts.
+        sanitise::clean(
+            &raw,
+            &format!("/api/messages/{blake3}/inline"),
+            allow_remote,
+        )
+    });
+
     let detail = archive_api_types::MessageDetail {
-        blake3,
+        blake3: blake3.clone(),
         subject: parsed.subject().map(str::to_string),
         from: mailboxes(parsed.from()),
         to: mailboxes(parsed.to()),
@@ -715,6 +765,10 @@ async fn message(
         size,
         text: parsed.body_text(0).map(|t| t.into_owned()),
         has_html: parsed.body_html(0).is_some(),
+        html: sanitised
+            .as_ref()
+            .map(|s| sanitise::frame_document(&s.html)),
+        blocked_images: sanitised.as_ref().map_or(0, |s| s.blocked_images),
         parts: parts(&parsed),
     };
 
@@ -761,4 +815,103 @@ fn parts(parsed: &mail_parser::Message) -> Vec<archive_api_types::Part> {
             size: part.len() as i64,
         })
         .collect()
+}
+
+/// One inline part, addressed by Content-ID, for display inside the frame.
+///
+/// Deliberately separate from the attachment download (phase 5), because the
+/// two have opposite jobs: this one is displayed, that one must never be. A
+/// single handler switching on a flag is the shape of bug a later refactor
+/// introduces.
+///
+/// Three rules make displaying it safe:
+///
+/// * only parts whose MAGIC BYTES are a known image type are served at all;
+/// * `Content-Type` comes from that sniff, never from the message's own claim,
+///   which the sender controls -- a part declaring `text/html` and served as
+///   such would be script execution on our origin;
+/// * `nosniff`, so a browser cannot second-guess us either.
+async fn inline_part(
+    State(state): State<AppState>,
+    scope: UserScope,
+    Path((blake3, cid)): Path<(String, String)>,
+) -> Response {
+    use mail_parser::MimeHeaders;
+
+    if blake3.len() != 64 || !blake3.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return (StatusCode::BAD_REQUEST, "malformed message id").into_response();
+    }
+
+    let found = match db::message_for_user(&state.pool, scope.user_id(), &blake3).await {
+        Ok(found) => found,
+        Err(e) => return internal("inline lookup", e),
+    };
+    let Some((bucket, _, _)) = found else {
+        return (StatusCode::NOT_FOUND, "no such message").into_response();
+    };
+
+    let store = match state.store(&bucket).await {
+        Ok(store) => store,
+        Err(e) => return internal("opening bucket", e),
+    };
+    let raw = match store.get_message(&blake3).await {
+        Ok(raw) => raw,
+        Err(e) => return internal("fetching message", e),
+    };
+    let Some(parsed) = mail_parser::MessageParser::default().parse(&raw) else {
+        return (StatusCode::UNPROCESSABLE_ENTITY, "unparseable message").into_response();
+    };
+
+    // Content-IDs are conventionally wrapped in angle brackets in the header and
+    // referenced without them in the body.
+    let wanted = cid.trim_matches(['<', '>']);
+    let part = parsed.parts.iter().find(|p| {
+        p.content_id()
+            .map(|id| id.trim_matches(['<', '>']) == wanted)
+            .unwrap_or(false)
+    });
+
+    let Some(part) = part else {
+        return (StatusCode::NOT_FOUND, "no such part").into_response();
+    };
+
+    let bytes = part.contents();
+    let Some(mime) = sniff_image(bytes) else {
+        // Not an image by its own bytes. Refused rather than served as
+        // something guessed: this endpoint exists only to display images.
+        return (StatusCode::UNSUPPORTED_MEDIA_TYPE, "not a recognised image").into_response();
+    };
+
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, mime.to_string()),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
+            (header::CONTENT_DISPOSITION, "inline".to_string()),
+            (header::CACHE_CONTROL, "private, no-store".to_string()),
+            // Belt and braces: even if this were somehow rendered as a
+            // document, it could load nothing and run nothing.
+            (
+                header::CONTENT_SECURITY_POLICY,
+                "default-src 'none'".to_string(),
+            ),
+        ],
+        bytes.to_vec(),
+    )
+        .into_response()
+}
+
+/// Identify an image by its leading bytes, ignoring anything the message claims.
+fn sniff_image(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) {
+        Some("image/png")
+    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some("image/jpeg")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if bytes.len() > 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        Some("image/webp")
+    } else {
+        None
+    }
 }

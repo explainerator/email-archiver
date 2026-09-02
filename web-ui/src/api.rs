@@ -139,8 +139,18 @@ fn encode(value: &str) -> String {
         .collect()
 }
 
-pub async fn message(blake3: &str) -> Result<archive_api_types::MessageDetail, Error> {
-    let response = Request::get(&format!("/api/messages/{}", encode(blake3)))
+/// One message. `remote_images` opts in to loading remote images for this
+/// request only -- it is not a stored preference, because consenting to be
+/// tracked by one sender is not consent for every sender.
+pub async fn message(
+    blake3: &str,
+    remote_images: bool,
+) -> Result<archive_api_types::MessageDetail, Error> {
+    let url = match remote_images {
+        true => format!("/api/messages/{}?images=remote", encode(blake3)),
+        false => format!("/api/messages/{}", encode(blake3)),
+    };
+    let response = Request::get(&url)
         .send()
         .await
         .map_err(|e| Error::Transport(e.to_string()))?;

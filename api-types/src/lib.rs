@@ -135,5 +135,16 @@ pub struct MessageDetail {
     pub text: Option<String>,
     /// Whether a `text/html` alternative exists.
     pub has_html: bool,
+    /// The HTML body, sanitised and wrapped in a complete document for the
+    /// reading frame -- including its own Content-Security-Policy.
+    ///
+    /// The client must render this in a sandboxed iframe via `srcdoc` and must
+    /// never inject it into the page. It is safe because of what was removed,
+    /// not because of what it is, and the sandbox is a deliberate second layer
+    /// over the sanitiser (WEBAPP-PLAN.md 6.5).
+    pub html: Option<String>,
+    /// Remote images blocked while sanitising. Non-zero means the client should
+    /// offer to load them, rather than silently hiding that anything was cut.
+    pub blocked_images: usize,
     pub parts: Vec<Part>,
 }
