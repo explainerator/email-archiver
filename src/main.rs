@@ -7,6 +7,7 @@ mod check;
 mod config;
 mod db;
 mod envelope;
+mod fetch;
 mod ingest;
 mod server;
 mod store;

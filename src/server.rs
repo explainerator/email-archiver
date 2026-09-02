@@ -16,6 +16,10 @@ use anyhow::{Context, Result};
 use imap_next::imap_types::core::{Tag, Vec1};
 use imap_next::imap_types::flag::{Flag, FlagPerm};
 use imap_next::imap_types::mailbox::{ListMailbox, Mailbox};
+use imap_next::imap_types::core::{IString, Literal, NString};
+use imap_next::imap_types::datetime::DateTime;
+use imap_next::imap_types::fetch::{MessageDataItem, MessageDataItemName, Section};
+use imap_next::imap_types::flag::FlagFetch;
 use imap_next::imap_types::response::{Capability, Code, Data, Greeting, Status};
 use imap_next::server::{Options, Server};
 use imap_next::stream::Stream;
@@ -24,6 +28,8 @@ use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::config::Config;
+use crate::fetch as fetchlib;
+use crate::store::Store;
 
 /// Everything the connection knows once a user has logged in.
 struct Session {
@@ -143,6 +149,89 @@ async fn handle(
                 }
                 None => no(server, tag, "no such archive user"),
             }
+        }
+
+        CommandBody::Fetch {
+            sequence_set,
+            macro_or_item_names,
+            uid,
+        } => {
+            let Some(sess) = session.as_ref() else {
+                no(server, tag, "not authenticated");
+                return Ok(false);
+            };
+            let Some((folder_id, _)) = sess.selected.clone() else {
+                no(server, tag, "no mailbox selected");
+                return Ok(false);
+            };
+
+            let rows = folder_messages(pool, folder_id).await?;
+            let names = item_names(&macro_or_item_names);
+
+            // Sequence numbers are positions in uid order; UID FETCH addresses
+            // the same rows by uid instead.
+            let max = rows.len() as u32;
+            let wanted: Vec<usize> = (0..rows.len())
+                .filter(|i| {
+                    let seq = (i + 1) as u32;
+                    let key = if uid { rows[*i].uid as u32 } else { seq };
+                    in_set(&sequence_set, key, max)
+                })
+                .collect();
+
+            println!("    fetch: {} of {} messages", wanted.len(), rows.len());
+
+            // Only touch S3 when a body was actually asked for. Thunderbird
+            // builds its message list from metadata alone, and fetching bodies
+            // it never requested would make listing a folder pull gigabytes.
+            let needs_body = names.iter().any(|n| {
+                matches!(
+                    n,
+                    MessageDataItemName::BodyExt { .. }
+                        | MessageDataItemName::Rfc822
+                        | MessageDataItemName::Rfc822Header
+                        | MessageDataItemName::Rfc822Text
+                )
+            });
+            let store = if needs_body {
+                Some(Store::open(config, &sess.bucket).await?)
+            } else {
+                None
+            };
+
+            for i in wanted {
+                let row = &rows[i];
+                let seq = std::num::NonZeroU32::new((i + 1) as u32).unwrap();
+
+                let raw = match &store {
+                    Some(st) => Some(st.get_message(&row.blake3).await?),
+                    None => None,
+                };
+
+                let mut items: Vec<MessageDataItem> = Vec::new();
+                for name in &names {
+                    if let Some(item) = build_item(name, row, raw.as_deref()) {
+                        items.push(item);
+                    }
+                }
+                // UID is always included for a UID FETCH, whether asked for or
+                // not: clients rely on it to correlate the response.
+                if uid && !names.contains(&MessageDataItemName::Uid) {
+                    items.push(MessageDataItem::Uid(
+                        std::num::NonZeroU32::new(row.uid as u32).unwrap(),
+                    ));
+                }
+                if items.is_empty() {
+                    continue;
+                }
+                server.enqueue_data(Data::Fetch {
+                    seq,
+                    items: Vec1::try_from(items).unwrap(),
+                });
+            }
+
+            ok(server, tag, "FETCH done");
+            return Ok(false);
         }
 
         CommandBody::Logout => {
@@ -279,6 +368,119 @@ async fn folders_for(pool: &PgPool, user_id: i64) -> Result<Vec<(i64, String)>> 
         .into_iter()
         .map(|(id, label, name)| (id, format!("{label}/{name}")))
         .collect())
+}
+
+pub struct Row {
+    pub uid: i64,
+    pub blake3: String,
+    pub size: i64,
+    pub internaldate: chrono::DateTime<chrono::Utc>,
+    pub seen: bool,
+}
+
+async fn folder_messages(pool: &PgPool, folder_id: i64) -> Result<Vec<Row>> {
+    let rows: Vec<(i64, String, i64, chrono::DateTime<chrono::Utc>, bool)> = sqlx::query_as(
+        "SELECT p.uid, m.blake3, m.size, m.internaldate, p.seen
+         FROM placements p JOIN messages m ON m.id = p.message_id
+         WHERE p.folder_id = $1
+         ORDER BY p.uid",
+    )
+    .bind(folder_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| Row {
+            uid: r.0,
+            blake3: r.1,
+            size: r.2,
+            internaldate: r.3,
+            seen: r.4,
+        })
+        .collect())
+}
+
+fn item_names(
+    m: &imap_next::imap_types::fetch::MacroOrMessageDataItemNames<'static>,
+) -> Vec<MessageDataItemName<'static>> {
+    use imap_next::imap_types::fetch::MacroOrMessageDataItemNames as M;
+    use imap_next::imap_types::IntoStatic;
+    match m {
+        M::Macro(mac) => mac.expand().into_iter().map(|n| n.into_static()).collect(),
+        M::MessageDataItemNames(names) => names.clone(),
+    }
+}
+
+fn in_set(set: &imap_next::imap_types::sequence::SequenceSet, value: u32, max: u32) -> bool {
+    set.iter(std::num::NonZeroU32::new(max.max(1)).unwrap())
+        .any(|v| v.get() == value)
+}
+
+fn nstring(bytes: &[u8]) -> NString<'static> {
+    NString(Some(IString::Literal(
+        Literal::try_from(bytes.to_vec()).unwrap(),
+    )))
+}
+
+fn build_item(
+    name: &MessageDataItemName<'static>,
+    row: &Row,
+    raw: Option<&[u8]>,
+) -> Option<MessageDataItem<'static>> {
+    Some(match name {
+        MessageDataItemName::Uid => {
+            MessageDataItem::Uid(std::num::NonZeroU32::new(row.uid as u32)?)
+        }
+        MessageDataItemName::Flags => MessageDataItem::Flags(if row.seen {
+            vec![FlagFetch::Flag(imap_next::imap_types::flag::Flag::Seen)]
+        } else {
+            vec![]
+        }),
+        MessageDataItemName::Rfc822Size => MessageDataItem::Rfc822Size(row.size as u32),
+        MessageDataItemName::InternalDate => {
+            MessageDataItem::InternalDate(DateTime::try_from(row.internaldate.fixed_offset()).ok()?)
+        }
+        MessageDataItemName::Rfc822 => MessageDataItem::Rfc822(nstring(raw?)),
+        MessageDataItemName::Rfc822Header => {
+            MessageDataItem::Rfc822Header(nstring(fetchlib::split_header_body(raw?).0))
+        }
+        MessageDataItemName::Rfc822Text => {
+            MessageDataItem::Rfc822Text(nstring(fetchlib::split_header_body(raw?).1))
+        }
+        MessageDataItemName::BodyExt {
+            section, partial, ..
+        } => {
+            let raw = raw?;
+            let selected: Vec<u8> = match section {
+                None => raw.to_vec(),
+                Some(Section::Header(_)) => fetchlib::split_header_body(raw).0.to_vec(),
+                Some(Section::Text(_)) => fetchlib::split_header_body(raw).1.to_vec(),
+                Some(Section::HeaderFields(_, fields)) => {
+                    let wanted: Vec<String> = fields
+                        .as_ref()
+                        .iter()
+                        .map(|f| String::from_utf8_lossy(f.as_ref()).to_string())
+                        .collect();
+                    fetchlib::header_fields(raw, &wanted)
+                }
+                // MIME part addressing needs a generated body structure; not
+                // implemented, so say nothing rather than return wrong bytes.
+                Some(_) => return None,
+            };
+            let sliced = match partial {
+                Some((offset, len)) => fetchlib::partial(&selected, *offset, len.get()).to_vec(),
+                None => selected,
+            };
+            MessageDataItem::BodyExt {
+                section: section.clone(),
+                origin: partial.map(|(o, _)| o).filter(|o| *o > 0),
+                data: nstring(&sliced),
+            }
+        }
+        // ENVELOPE and BODYSTRUCTURE need generated structures; skipped for now
+        // so a client that asks gets a response without them rather than a lie.
+        _ => return None,
+    })
 }
 
 /// (folder id, message count, our uidvalidity, our uidnext)
