@@ -533,8 +533,18 @@ pub async fn messages_page(
                 m.blake3,
                 m.subject,
                 m.from_addr,
+                -- The sender's display name, from the envelope already stored at
+                -- ingest. No migration and no re-parse of 53,000 messages: the
+                -- data was captured the first time round.
+                m.envelope->'from'->0->>'name' AS from_name,
                 m.internaldate,
-                m.size
+                m.size,
+                -- Likewise for the paperclip: bodystructure already records
+                -- is_attachment per part.
+                EXISTS (
+                    SELECT 1 FROM jsonb_array_elements(m.bodystructure->'parts') part
+                     WHERE (part->>'is_attachment')::boolean
+                ) AS has_attachments
            FROM placements p
            JOIN messages m ON m.id = p.message_id
            JOIN folders  f ON f.id = p.folder_id
@@ -565,8 +575,10 @@ pub struct MessageRow {
     pub blake3: String,
     pub subject: Option<String>,
     pub from_addr: Option<String>,
+    pub from_name: Option<String>,
     pub internaldate: chrono::DateTime<chrono::Utc>,
     pub size: i64,
+    pub has_attachments: bool,
 }
 
 /// Locate one message for a user, returning the bucket it lives in.
@@ -595,6 +607,38 @@ pub async fn message_for_user(
     .await?;
 
     Ok(row)
+}
+
+/// Set read state on one placement. Returns false if it is not this user's.
+///
+/// The scoping join is what makes a guessed folder/uid pair harmless: without
+/// it, any authenticated user could flip read state on anyone's mail. Postgres
+/// does not allow a JOIN in UPDATE directly, so ownership is a subquery.
+pub async fn set_seen(
+    pool: &PgPool,
+    user_id: i64,
+    folder_id: i64,
+    uid: i64,
+    seen: bool,
+) -> Result<bool> {
+    let result = sqlx::query(
+        "UPDATE placements SET seen = $4
+          WHERE folder_id = $2
+            AND uid = $3
+            AND folder_id IN (
+                SELECT f.id FROM folders f
+                  JOIN accounts a ON a.id = f.account_id
+                 WHERE a.user_id = $1
+            )",
+    )
+    .bind(user_id)
+    .bind(folder_id)
+    .bind(uid)
+    .bind(seen)
+    .execute(pool)
+    .await?;
+
+    Ok(result.rows_affected() > 0)
 }
 
 /// One user by id, for the web session endpoint.

@@ -156,3 +156,27 @@ pub async fn message(
         .map_err(|e| Error::Transport(e.to_string()))?;
     decode(response, true).await
 }
+
+/// Mark a message read or unread. The only write in the whole API.
+pub async fn set_seen(folder_id: i64, uid: i64, seen: bool) -> Result<(), Error> {
+    let response = Request::patch(&format!("/api/placements/{folder_id}/{uid}"))
+        .json(&serde_json::json!({ "seen": seen }))
+        .map_err(|e| Error::Transport(e.to_string()))?
+        .send()
+        .await
+        .map_err(|e| Error::Transport(e.to_string()))?;
+
+    match response.status() {
+        204 => Ok(()),
+        401 => Err(Error::Unauthorized),
+        status => Err(Error::Api(format!(
+            "could not update read state ({status})"
+        ))),
+    }
+}
+
+/// URL for downloading one attachment. Not fetched here: the browser navigates
+/// to it so the download lands in the normal place with the normal UI.
+pub fn part_url(blake3: &str, index: usize) -> String {
+    format!("/api/messages/{}/parts/{index}", encode(blake3))
+}

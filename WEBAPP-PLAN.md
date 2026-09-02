@@ -1,8 +1,9 @@
 # archive-web — a browser client for the mail archive
 
-Status: **Phases 1-4 done.** A Dioxus app with login, folder pane and paged message
+Status: **Phases 1-5 done.** A Dioxus app with login, folder pane and paged message
 list and a reading pane showing plain text or sanitised HTML, served by
-`email-archiver serve-web`. Attachments, search and TLS (phases 5-7) outstanding.
+`email-archiver serve-web`, with attachment downloads and read state. Search and TLS
+(phases 6-7) outstanding.
 
 Build and run locally:
 
@@ -591,7 +592,7 @@ deployer: one binary, one upload, two units.
 | **3** | ✅ Folder pane + message list, keyset pagination | Done — Dioxus 0.7 app served by the binary; keyset paging flat with depth (§5.2), no index needed |
 | **4a** | ✅ Reading pane, **plain text only** | Done — headers, `text/plain` body, part list. HTML-only messages say so rather than showing an empty pane |
 | **4b** | ✅ Sanitised HTML (§6) | Done — structural allowlist, no author styles, opaque-origin sandbox, hash-pinned CSP, remote images blocked and counted, cid: images served same-origin by magic-byte sniff. 21 sanitiser tests |
-| **5** | Attachments; `\Seen` on read | Download works; read state agrees with Thunderbird |
+| **5** | ✅ Attachments; `\Seen` on read | Done — always-attachment downloads with sanitised filenames, optimistic read state, paperclip column |
 | **6** | Search step 1 (subject/from + `pg_trgm`) | Finding a known message takes one query |
 | **7** | TLS on 443, systemd unit, `status` rows | Reachable in production; certificate renews |
 

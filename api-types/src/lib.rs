@@ -73,12 +73,21 @@ pub struct MessageSummary {
     /// Content address of the message body, for fetching and for part URLs.
     pub blake3: String,
     pub subject: Option<String>,
+    /// The sender's address.
     pub from: Option<String>,
+    /// The sender's display name, when the message carried one.
+    ///
+    /// Sent alongside the address rather than instead of it: the list shows the
+    /// name because it is what people recognise, but a name is sender-supplied
+    /// and freely forgeable, so the address has to remain available.
+    pub from_name: Option<String>,
     /// RFC 3339. A string rather than a timestamp so the crate stays free of a
     /// date library that both sides would have to agree on.
     pub date: String,
     pub size: i64,
     pub seen: bool,
+    /// Whether any part is an attachment, for the list's paperclip column.
+    pub has_attachments: bool,
 }
 
 /// One page of a folder, plus how to ask for the next.

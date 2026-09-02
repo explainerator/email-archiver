@@ -158,6 +158,11 @@ fn router(state: AppState, assets: Option<PathBuf>) -> Result<Router> {
         .route("/folders/{id}/messages", get(messages))
         .route("/messages/{blake3}", get(message))
         .route("/messages/{blake3}/inline/{cid}", get(inline_part))
+        .route("/messages/{blake3}/parts/{index}", get(download_part))
+        .route(
+            "/placements/{folder_id}/{uid}",
+            axum::routing::patch(set_seen),
+        )
         // The API needs its OWN fallback. `nest` does not isolate 404s: an
         // unmatched path under /api falls through to the outer fallback, which
         // is the SPA shell -- so without this, a misspelled endpoint answers
@@ -560,9 +565,11 @@ async fn messages(
             blake3: r.blake3.clone(),
             subject: r.subject.clone(),
             from: r.from_addr.clone(),
+            from_name: r.from_name.clone(),
             date: r.internaldate.to_rfc3339(),
             size: r.size,
             seen: r.seen,
+            has_attachments: r.has_attachments,
         })
         .collect();
 
@@ -630,6 +637,37 @@ mod tests {
         let (back, uid) = decode_cursor(&encode_cursor(date, 1)).unwrap();
         assert_eq!(back, date);
         assert_eq!(uid, 1);
+    }
+
+    #[test]
+    fn attachment_names_cannot_escape_or_break_the_header() {
+        // The name comes from the message, so it is attacker-controlled.
+        // Asserting the PROPERTY, not an exact string: what matters is that
+        // no path separator survives, so the name cannot traverse anywhere,
+        // whatever the remaining punctuation looks like.
+        let traversal = safe_filename("../../etc/passwd");
+        assert!(!traversal.contains('/'), "{traversal}");
+        assert!(!traversal.contains(char::from(92)), "{traversal}");
+        assert!(!traversal.starts_with('.'), "{traversal}");
+
+        // Characters built from codes so the test itself carries no escapes:
+        // 92 backslash, 34 double quote, 39 single quote.
+        let backslash = char::from(92);
+        let quote = char::from(34);
+        assert_eq!(
+            safe_filename(&format!("C:{backslash}evil.exe")),
+            "C__evil.exe"
+        );
+        // A quote would end the Content-Disposition field early and let the
+        // rest of the name be read as further directives.
+        assert!(!safe_filename(&format!("a{quote}b")).contains(quote));
+
+        // Directory tricks and empty names are not names.
+        for bad in ["..", ".", "   ", ""] {
+            assert_eq!(safe_filename(bad), "attachment", "{bad:?}");
+        }
+        // Ordinary names survive intact.
+        assert_eq!(safe_filename("invoice 2026.pdf"), "invoice 2026.pdf");
     }
 
     #[test]
@@ -913,5 +951,127 @@ fn sniff_image(bytes: &[u8]) -> Option<&'static str> {
         Some("image/webp")
     } else {
         None
+    }
+}
+
+/// Download one attachment.
+///
+/// The opposite job to `inline_part`, and deliberately a separate handler:
+/// that one displays a narrow set of sniffed image types inside the sandbox,
+/// this one hands over ANYTHING the message contains and must therefore never
+/// be displayed. One handler switching on a flag is the shape of bug a later
+/// refactor introduces.
+async fn download_part(
+    State(state): State<AppState>,
+    scope: UserScope,
+    Path((blake3, index)): Path<(String, usize)>,
+) -> Response {
+    use mail_parser::MimeHeaders;
+
+    if blake3.len() != 64 || !blake3.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return (StatusCode::BAD_REQUEST, "malformed message id").into_response();
+    }
+
+    let found = match db::message_for_user(&state.pool, scope.user_id(), &blake3).await {
+        Ok(found) => found,
+        Err(e) => return internal("attachment lookup", e),
+    };
+    let Some((bucket, _, _)) = found else {
+        return (StatusCode::NOT_FOUND, "no such message").into_response();
+    };
+
+    let store = match state.store(&bucket).await {
+        Ok(store) => store,
+        Err(e) => return internal("opening bucket", e),
+    };
+    let raw = match store.get_message(&blake3).await {
+        Ok(raw) => raw,
+        Err(e) => return internal("fetching message", e),
+    };
+    let Some(parsed) = mail_parser::MessageParser::default().parse(&raw) else {
+        return (StatusCode::UNPROCESSABLE_ENTITY, "unparseable message").into_response();
+    };
+
+    let Some(part) = parsed.attachments().nth(index) else {
+        return (StatusCode::NOT_FOUND, "no such part").into_response();
+    };
+
+    let filename = part
+        .attachment_name()
+        .map(safe_filename)
+        .unwrap_or_else(|| format!("part-{index}"));
+
+    (
+        StatusCode::OK,
+        [
+            // ALWAYS attachment, and always octet-stream. The message's own
+            // Content-Type is attacker-controlled, and a part claiming text/html
+            // served inline on our origin is stored XSS with the sandbox
+            // bypassed entirely. Saving the file loses nothing: the operating
+            // system decides what opens it, from the name.
+            (header::CONTENT_TYPE, "application/octet-stream".to_string()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{filename}\""),
+            ),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
+            (header::CACHE_CONTROL, "private, no-store".to_string()),
+        ],
+        part.contents().to_vec(),
+    )
+        .into_response()
+}
+
+/// Strip anything from a sender-supplied filename that could escape a directory
+/// or break out of the Content-Disposition header.
+///
+/// The name comes from the message, so it may contain path separators, control
+/// characters, or a quote that would end the header field early and let the
+/// rest be read as further directives.
+fn safe_filename(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' | '\"' | '\'' => '_',
+            c if c.is_control() => '_',
+            c => c,
+        })
+        .collect();
+
+    // "..", "." and an empty name are all directory tricks rather than names.
+    let trimmed = cleaned.trim().trim_matches('.');
+    if trimmed.is_empty() {
+        return "attachment".to_string();
+    }
+    trimmed.chars().take(200).collect()
+}
+
+#[derive(Deserialize)]
+struct SeenRequest {
+    seen: bool,
+}
+
+/// Mark a message read or unread.
+///
+/// The ONLY write the entire API offers. `placements.seen` is the only mutable
+/// column in the schema, and it is a boolean rather than a flag array precisely
+/// so that "read state is the only thing a client can change" is enforced by the
+/// database rather than by this handler being careful.
+async fn set_seen(
+    State(state): State<AppState>,
+    scope: UserScope,
+    Path((folder_id, uid)): Path<(i64, i64)>,
+    Json(body): Json<SeenRequest>,
+) -> Response {
+    match db::set_seen(&state.pool, scope.user_id(), folder_id, uid, body.seen).await {
+        Ok(true) => (StatusCode::NO_CONTENT, ()).into_response(),
+        // The placement does not exist, or belongs to someone else. Not
+        // distinguished, for the same reason as everywhere else.
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "no such message" })),
+        )
+            .into_response(),
+        Err(e) => internal("set seen", e),
     }
 }

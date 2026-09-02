@@ -245,9 +245,41 @@ fn MessageList(folder: Folder, opened: Option<String>, onopen: EventHandler<Stri
                         },
                         onclick: {
                             let hash = message.blake3.clone();
-                            move |_| onopen.call(hash.clone())
+                            let uid = message.uid;
+                            let was_seen = message.seen;
+                            move |_| {
+                                onopen.call(hash.clone());
+                                // Opening a message marks it read. Optimistic:
+                                // the row updates immediately and the request
+                                // follows, because waiting on a round trip to
+                                // grey out a row you just clicked feels broken.
+                                // A failure leaves read state stale, which is
+                                // the mildest thing that can go wrong here.
+                                if !was_seen {
+                                    if let Some(row) =
+                                        messages.write().iter_mut().find(|m| m.uid == uid)
+                                    {
+                                        row.seen = true;
+                                    }
+                                    spawn(async move {
+                                        let _ = api::set_seen(id, uid, true).await;
+                                    });
+                                }
+                            }
                         },
-                        td { class: "from", "{message.from.clone().unwrap_or_default()}" }
+                        td { class: "clip",
+                            // Titled so the column is not a mystery glyph to
+                            // anyone using a screen reader.
+                            if message.has_attachments {
+                                span { title: "Has attachments", "\u{1F4CE}" }
+                            }
+                        }
+                        td { class: "from", title: "{message.from.clone().unwrap_or_default()}",
+                            // The display name is what people recognise; the
+                            // address stays in the tooltip, because a name is
+                            // sender-supplied and freely forgeable.
+                            "{sender(&message)}"
+                        }
                         td { class: "subject",
                             "{message.subject.clone().unwrap_or_else(|| String::from(\"(no subject)\"))}"
                         }
@@ -335,10 +367,14 @@ fn MessageView(
                 ul { class: "parts",
                     for part in message.parts.iter() {
                         li { key: "{part.index}",
-                            // Not links yet: the download endpoint is phase 5.
-                            // Listing them is still worth doing -- knowing an
-                            // attachment exists is most of the value.
-                            span { "{part.filename.clone().unwrap_or_else(|| String::from(\"(unnamed)\"))}" }
+                            a {
+                                href: "{api::part_url(&message.blake3, part.index)}",
+                                // The server always sends Content-Disposition:
+                                // attachment, so this saves the file rather than
+                                // opening whatever it claims to be.
+                                download: "{part.filename.clone().unwrap_or_default()}",
+                                "{part.filename.clone().unwrap_or_else(|| String::from(\"(unnamed)\"))}"
+                            }
                             span { class: "muted", " {part.content_type} · {kilobytes(part.size)}" }
                         }
                     }
@@ -433,4 +469,18 @@ fn kilobytes(bytes: i64) -> String {
     } else {
         format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
     }
+}
+
+/// What to show in the list's sender column.
+///
+/// The display name when the message carried one, falling back to the address.
+/// A name is sender-supplied and trivially forged, so the address is kept in
+/// the row's tooltip rather than discarded.
+fn sender(message: &MessageSummary) -> String {
+    message
+        .from_name
+        .clone()
+        .filter(|n| !n.trim().is_empty())
+        .or_else(|| message.from.clone())
+        .unwrap_or_else(|| String::from("(unknown sender)"))
 }

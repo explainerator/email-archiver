@@ -46,8 +46,20 @@ body {
   color: var(--accent); font: inherit; cursor: pointer;
 }
 
-/* Fixed folder and list widths, reader takes the rest. */
-.panes { display: grid; grid-template-columns: 16rem 24rem 1fr; flex: 1; min-height: 0; }
+/* Folders and reader are fixed; the message LIST takes the slack, so widening
+   the window buys more subject text rather than a wider reading pane. The
+   reader has a natural comfortable measure and gains nothing from being
+   stretched; the subject column always does. */
+.panes {
+  display: grid;
+  grid-template-columns: 15rem minmax(0, 1fr) 46rem;
+  flex: 1; min-height: 0;
+}
+/* Below that width there is not enough room for three panes with a fixed
+   reader, so it yields rather than pushing the list to nothing. */
+@media (max-width: 78rem) {
+  .panes { grid-template-columns: 13rem minmax(0, 1fr) minmax(0, 1.3fr); }
+}
 .panes > * { overflow-y: auto; min-width: 0; }
 .folders { border-right: 1px solid var(--line); padding: .5rem; }
 .list { border-right: 1px solid var(--line); }
@@ -68,13 +80,20 @@ body {
   padding: .6rem 1rem; border-bottom: 1px solid var(--line);
   position: sticky; top: 0; background: var(--bg);
 }
+/* table-layout: fixed so the sized columns hold and only the subject flexes;
+   without it the browser re-measures from content and the columns jump as you
+   page through. */
 .list table { width: 100%; border-collapse: collapse; table-layout: fixed; }
 .list td {
   padding: .4rem .6rem; border-bottom: 1px solid var(--line);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.list .from { width: 34%; color: var(--muted); }
+/* Paperclip, sender and date are fixed; the subject column has no width and so
+   absorbs everything left over. */
+.list .clip { width: 1.6rem; padding-right: 0; text-align: center; opacity: .7; }
+.list .from { width: 15rem; color: var(--muted); }
 .list .date { width: 6.5rem; color: var(--muted); text-align: right; }
+.list .subject { color: var(--fg); }
 .list tr.unseen td { font-weight: 600; color: var(--fg); }
 .more {
   display: block; width: calc(100% - 2rem); margin: 1rem;
