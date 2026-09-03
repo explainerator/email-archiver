@@ -26,8 +26,10 @@
 //!    single scope `https://mail.google.com/`.
 //! 5. Point `gmail.service_account_key` in `config.toml` at the JSON file.
 //!
-//! Step 4 is the one that is easy to miss, and its failure mode is a token
-//! request rejected with `unauthorized_client` — see [`AccessTokens::for_user`].
+//! All five steps are required. Step 4 is worth naming because it is the only
+//! one that fails silently: without it the key still downloads, still parses and
+//! still stores, and the first sign of trouble is a token request rejected with
+//! `unauthorized_client` — see [`AccessTokens::for_user`].
 //!
 //! # Why the HTTP request is hand-rolled
 //!

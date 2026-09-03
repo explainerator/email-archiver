@@ -630,9 +630,11 @@ The code is written and tested; none of it can run until the Google side exists.
    It is read once and kept encrypted in the database; the file is not needed
    afterwards and should not be left lying about.
 
-Step 4 is the one that is easy to skip, because everything up to it succeeds
-without it. Its symptom is a token request rejected with `unauthorized_client`,
-which reads like a credential problem rather than a missing authorisation.
+Every step is required. Step 4 is singled out only because omitting it is not
+visible at the time — the key downloads and stores fine, and the account
+registers fine — so the first symptom is a token request rejected with
+`unauthorized_client` at ingest, which reads like a credential problem rather
+than a missing authorisation.
 
 `https://mail.google.com/` looks broader than it should be, and is not
 avoidable: it is the only scope Gmail's IMAP endpoint accepts. `gmail.readonly`

@@ -33,9 +33,12 @@ The example is `ken@thebackroom420.ca` landing in `ken@twoducks.ca`'s archive.
    - Client ID: from step 3
    - Scopes: `https://mail.google.com/`
 
-> **Step 4 is the one that gets skipped.** Everything before it succeeds without it, and
-> the symptom appears much later as `unauthorized_client` on the first token request —
-> which reads like a bad key rather than a missing authorisation.
+> **All four steps are required.** Step 4 is called out because it is the only one whose
+> omission is not obvious at the time: steps 1–3 fail visibly and immediately if you get
+> them wrong, whereas skipping step 4 leaves everything looking finished — the key
+> downloads, `set-google` accepts it, `add-account` succeeds — and the first sign of
+> trouble is `unauthorized_client` when you finally run `ingest`, which reads like a bad
+> key rather than a missing authorisation.
 >
 > `https://mail.google.com/` looks broader than it should be and is not avoidable: it is
 > the only scope Gmail's IMAP endpoint accepts. `gmail.readonly` covers the REST API and
