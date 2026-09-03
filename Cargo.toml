@@ -44,6 +44,12 @@ rpassword = "7"
 # HTML sanitisation for the reading pane. Parse-then-reserialise on html5ever,
 # never regex -- see src/sanitise.rs and WEBAPP-PLAN.md 6.
 ammonia = "4"
+# Google Workspace ingest (src/gmail.rs). ring signs the service-account
+# assertion and http-body-util collects the one HTTP response; hyper,
+# tokio-rustls and webpki-roots were already here for the web server and S3, so
+# no HTTP client crate is needed for a single POST.
+ring = "0.17"
+http-body-util = "0.1"
 # CSP source hashes must be sha256/384/512, so blake3 cannot serve here. Already
 # in the tree via the AWS SDK's request signing; named directly because we rely
 # on it. See sanitise::frame_document.

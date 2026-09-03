@@ -61,3 +61,15 @@ secret_key = "${creds.secret_key}"
 cert_path = "${tls_cert_path}"
 key_path  = "${tls_key_path}"
 %{ endif ~}
+
+# ----------------------------------------------------------------------------
+# Google Workspace ingest.
+#
+# One service account with domain-wide delegation serves every mailbox in the
+# domain, so there is nothing per-account to configure and no refresh token to
+# store or expire. Absent unless there are Workspace mailboxes to ingest.
+# ----------------------------------------------------------------------------
+%{ if gmail_service_account_key != "" ~}
+[gmail]
+service_account_key = "${gmail_service_account_key}"
+%{ endif ~}

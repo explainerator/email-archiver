@@ -195,11 +195,30 @@ async fn connect(source: &Source) -> Result<Session> {
         .context("TLS handshake failed")?;
 
     let client = async_imap::Client::new(tls);
-    client
-        .login(&source.username, &source.password)
-        .await
-        .map_err(|(e, _)| e)
-        .with_context(|| format!("logging in as {}", source.username))
+
+    match &source.auth {
+        crate::config::Auth::Password(password) => client
+            .login(&source.username, password)
+            .await
+            .map_err(|(e, _)| e)
+            .with_context(|| format!("logging in as {}", source.username)),
+
+        // Google Workspace. The token was minted for this exact mailbox by a
+        // service account with domain-wide delegation; see src/gmail.rs.
+        crate::config::Auth::XOAuth2 { token } => {
+            let auth = crate::gmail::XOAuth2::new(source.username.clone(), token.clone());
+            client
+                .authenticate("XOAUTH2", auth)
+                .await
+                .map_err(|(e, _)| e)
+                .with_context(|| {
+                    format!(
+                        "XOAUTH2 authentication as {} failed. If the token was minted but                          rejected, the service account most likely lacks domain-wide                          delegation for https://mail.google.com/ in the Admin console.",
+                        source.username
+                    )
+                })
+        }
+    }
 }
 
 /// Ingest every folder of one account.
@@ -211,8 +230,33 @@ pub async fn run(config: &Config, pool: &PgPool, address: &str) -> Result<()> {
         let mut scope = db::Scope::begin(pool, owner).await?;
         db::account_by_address(&mut scope, address).await?
     };
-    let key = config.key()?;
-    let source = db::source_for(pool, &key, address).await?;
+    // The provider decides how we authenticate, which is the whole reason that
+    // column exists. Generic IMAP uses stored credentials; Google Workspace
+    // mints a short-lived token from the service account instead, so those
+    // accounts have no host or password recorded at all.
+    let source = match account.provider.as_str() {
+        "gmail" => {
+            let path = config.gmail.service_account_key.as_deref().context(
+                "this is a Google Workspace account, but gmail.service_account_key is not set                  in config.toml. See src/gmail.rs for the one-time setup.",
+            )?;
+            let tokens = crate::gmail::AccessTokens::new(crate::gmail::ServiceAccount::load(path)?);
+            let token = tokens.for_user(address).await?;
+            crate::config::Source {
+                host: "imap.gmail.com".to_string(),
+                port: 993,
+                username: address.to_string(),
+                auth: crate::config::Auth::XOAuth2 { token },
+                // Google's certificate is valid and this credential can read
+                // every mailbox in the domain; there is no case for accepting
+                // an unverified server here.
+                allow_invalid_certs: false,
+            }
+        }
+        _ => {
+            let key = config.key()?;
+            db::source_for(pool, &key, address).await?
+        }
+    };
     // Arc so every concurrent task shares one S3 client and its connection pool.
     let store = Arc::new(Store::open(config, &account.bucket).await?);
 

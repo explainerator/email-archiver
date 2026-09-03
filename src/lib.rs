@@ -19,6 +19,7 @@ pub mod db;
 pub mod diagnose;
 pub mod envelope;
 pub mod fetch;
+pub mod gmail;
 pub mod ingest;
 pub mod listen;
 pub mod naming;

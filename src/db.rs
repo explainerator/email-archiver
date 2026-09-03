@@ -20,6 +20,10 @@ pub struct Account {
     pub user_id: i64,
     pub address: String,
     pub label: String,
+    /// `gmail` or `imap`. Drives HOW ingest authenticates, not where mail is
+    /// stored: Workspace accounts mint a token from the service account,
+    /// generic IMAP uses the stored credentials.
+    pub provider: String,
     /// The user's S3 bucket. Carried here so ingest never has to guess which
     /// bucket an account's mail belongs in.
     pub bucket: String,
@@ -188,8 +192,8 @@ pub async fn owner_of_address(pool: &PgPool, address: &str) -> Result<i64> {
 }
 
 pub async fn account_by_address(scope: &mut Scope<'_>, address: &str) -> Result<Account> {
-    let row: (i64, i64, String, String, String) = sqlx::query_as(
-        "SELECT a.id, a.user_id, a.address, a.label, u.bucket
+    let row: (i64, i64, String, String, String, String) = sqlx::query_as(
+        "SELECT a.id, a.user_id, a.address, a.label, u.bucket, a.provider
          FROM accounts a JOIN users u ON u.id = a.user_id
          WHERE a.address = $1",
     )
@@ -204,6 +208,7 @@ pub async fn account_by_address(scope: &mut Scope<'_>, address: &str) -> Result<
         address: row.2,
         label: row.3,
         bucket: row.4,
+        provider: row.5,
     })
 }
 
@@ -523,7 +528,7 @@ pub async fn source_for(
         host,
         port: port as u16,
         username,
-        password: key.decrypt(&password_enc)?,
+        auth: crate::config::Auth::Password(key.decrypt(&password_enc)?),
         allow_invalid_certs,
     })
 }

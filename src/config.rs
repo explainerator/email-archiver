@@ -39,6 +39,33 @@ pub struct Config {
     pub ingest: Ingest,
     #[serde(default)]
     pub tls: Tls,
+    #[serde(default)]
+    pub gmail: Gmail,
+}
+
+/// Google Workspace ingest. Absent unless there are Workspace mailboxes.
+#[derive(Deserialize, Default)]
+pub struct Gmail {
+    /// Path to the service account JSON key, with domain-wide delegation
+    /// granted for `https://mail.google.com/`. See src/gmail.rs for the setup.
+    ///
+    /// One key serves every mailbox in the domain, so this is global rather
+    /// than per-account. A second Workspace domain would need a second key and
+    /// a change here.
+    pub service_account_key: Option<String>,
+}
+
+/// How ingest authenticates to a source mailbox.
+///
+/// Kept as an enum rather than an optional token beside an optional password,
+/// so a source cannot be half-configured with both or neither.
+pub enum Auth {
+    /// Generic IMAP. Decrypted in memory only; never written back anywhere.
+    Password(String),
+    /// Google Workspace, via a service account impersonating the mailbox. The
+    /// token is minted per connection and lives about an hour, so unlike a
+    /// password there is nothing here worth persisting.
+    XOAuth2 { token: String },
 }
 
 /// TLS for the IMAP listener.
@@ -74,8 +101,8 @@ pub struct Source {
     pub host: String,
     pub port: u16,
     pub username: String,
-    /// Decrypted in memory only; never written back anywhere.
-    pub password: String,
+    /// How to prove who we are to this server.
+    pub auth: Auth,
 
     /// Accept any server certificate for this source, including expired,
     /// self-signed, or wrong-hostname ones.

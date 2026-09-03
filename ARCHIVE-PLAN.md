@@ -528,13 +528,51 @@ Refuse. The value here is that it does one thing.
 | **5** | ✅ LIST, LSUB, SELECT, FETCH · ⬜ STATUS, SEARCH | Thunderbird logs in, browses 47 folders and displays bodies. **ENVELOPE and BODYSTRUCTURE turn out not to be needed** — Thunderbird builds its list from `BODY.PEEK[HEADER.FIELDS (...)]` |
 | **6** | §6.2 rebuild test — drop the schema, reindex from S3 | Identical count, UIDs, structure |
 | **7** | ✅ certbot, `deploy email-archiver`, **systemd units running the binary directly** (no Docker) | Done — IMAPS live on the instance under a Let's Encrypt certificate; the web client is a second unit on 443 |
-| **8a** | **Google Workspace accounts** — OAuth2 path, small data, *hard deadline* (R3) | Business mail archived before those accounts close |
+| **8a** | ✅ code · ⬜ Google-side setup | **Google Workspace via a service account with domain-wide delegation** — no per-user consent, no refresh tokens to expire. Code and tests done; needs the Cloud project, the JSON key and the Admin-console delegation (§8a.1) before it can run |
 | **8b** | Self-hosted `twoducks.ca` ~15 GB, then the remainder | Complete archive |
 
 Phase 4 is deliberately early: it is the riskiest unknown, and everything after it is
 conventional work.
 
 ---
+
+### 8a.1 Google Workspace setup — what only you can do
+
+The code is written and tested; none of it can run until the Google side exists.
+**As the Workspace admin**, once:
+
+1. **Google Cloud console** → new project → enable the **Gmail API**.
+2. Create a **service account**. Create a **JSON key** for it and save the file.
+3. On the service account's details page, note its **Client ID** — the long
+   number, *not* the `@...gserviceaccount.com` address.
+4. **Admin console** → Security → Access and data control → **API controls** →
+   **Domain-wide delegation** → *Add new*. Paste the Client ID from step 3, and
+   the single scope:
+
+   ```
+   https://mail.google.com/
+   ```
+
+5. Set `gmail_service_account_key` in `terraform.tfvars` to the JSON key's path
+   and re-render `config.toml`.
+
+Step 4 is the one that is easy to skip, because everything up to it succeeds
+without it. Its symptom is a token request rejected with `unauthorized_client`,
+which reads like a credential problem rather than a missing authorisation.
+
+`https://mail.google.com/` looks broader than it should be, and is not
+avoidable: it is the only scope Gmail's IMAP endpoint accepts. `gmail.readonly`
+covers the REST API and IMAP refuses it.
+
+Then, per mailbox:
+
+```
+email-archiver add-account <login> <address> <label> gmail
+email-archiver ingest <address>
+```
+
+No `set-source` — Workspace accounts store no host and no password, which is the
+point of the delegation.
 
 ## 9. Open questions
 

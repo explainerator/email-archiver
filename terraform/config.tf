@@ -93,6 +93,20 @@ locals {
   tls_key_path  = var.tls_key_path != "" ? var.tls_key_path : "${local.letsencrypt_live}/privkey.pem"
 }
 
+variable "gmail_service_account_key" {
+  description = <<-EOT
+    Path to the Google service account JSON key used to ingest Workspace
+    mailboxes, with domain-wide delegation granted for
+    https://mail.google.com/. See src/gmail.rs for the one-time setup.
+
+    A PATH, not the key itself: the file stays wherever you put it and never
+    enters Terraform state. Ingest runs from a workstation, so this is normally
+    a local path; leave it empty if there are no Workspace mailboxes.
+  EOT
+  type        = string
+  default     = ""
+}
+
 variable "encryption_key" {
   description = <<-EOT
     Base64 32-byte key encrypting source mailbox passwords in the database.
@@ -112,11 +126,13 @@ variable "encryption_key" {
 
 locals {
   archiver_config = templatefile("${path.module}/files/config.toml.tftpl", {
-    database_url   = var.database_url
-    s3_endpoint    = "https://s3.${lower(var.storage_region)}.io.cloud.ovh.net"
-    encryption_key = var.encryption_key
-    tls_cert_path  = local.tls_cert_path
-    tls_key_path   = local.tls_key_path
+    database_url              = var.database_url
+    s3_endpoint               = "https://s3.${lower(var.storage_region)}.io.cloud.ovh.net"
+    encryption_key            = var.encryption_key
+    gmail_service_account_key = var.gmail_service_account_key
+
+    tls_cert_path = local.tls_cert_path
+    tls_key_path  = local.tls_key_path
 
     ingest_concurrency       = var.ingest_concurrency
     database_max_connections = var.database_max_connections
