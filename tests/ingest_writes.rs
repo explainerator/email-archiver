@@ -71,7 +71,10 @@ async fn run(pool: &sqlx::PgPool) -> anyhow::Result<()> {
     let account_id = db::create_account(pool, TEST_LOGIN, TEST_ADDRESS, "probe", "imap").await?;
 
     // --- folders -------------------------------------------------------------
-    let folder = db::folder_for_ingest(pool, account_id, "Probe", 1).await?;
+    // Through a Scope, exactly as ingest does since RLS phase 2b.
+    let mut scope = db::Scope::begin(pool, user_id).await?;
+    let folder = db::folder_for_ingest(&mut scope, account_id, "Probe", 1).await?;
+    scope.commit().await?;
 
     let folder_owner: i64 = sqlx::query_scalar("SELECT user_id FROM folders WHERE id = $1")
         .bind(folder.id)
@@ -83,9 +86,9 @@ async fn run(pool: &sqlx::PgPool) -> anyhow::Result<()> {
     );
 
     // --- messages and placements --------------------------------------------
+    let mut scope = db::Scope::begin(pool, user_id).await?;
     let message_id = db::upsert_message(
-        pool,
-        user_id,
+        &mut scope,
         &"c".repeat(64),
         42,
         chrono::Utc::now(),
@@ -97,8 +100,9 @@ async fn run(pool: &sqlx::PgPool) -> anyhow::Result<()> {
     )
     .await?;
 
-    let (uid, created) = db::place_message(pool, folder.id, message_id, 1, false).await?;
+    let (uid, created) = db::place_message(&mut scope, folder.id, message_id, 1, false).await?;
     anyhow::ensure!(created, "placement should be new");
+    scope.commit().await?;
 
     let placement_owner: i64 =
         sqlx::query_scalar("SELECT user_id FROM placements WHERE folder_id = $1 AND uid = $2")
@@ -116,7 +120,8 @@ async fn run(pool: &sqlx::PgPool) -> anyhow::Result<()> {
     // the old VALUES form raised a foreign-key violation. place_message must
     // notice, rather than returning a UID for a placement it never stored.
     let missing_folder = i64::MAX;
-    let outcome = db::place_message(pool, missing_folder, message_id, 2, false).await;
+    let mut scope = db::Scope::begin(pool, user_id).await?;
+    let outcome = db::place_message(&mut scope, missing_folder, message_id, 2, false).await;
     anyhow::ensure!(
         outcome.is_err(),
         "placing into a non-existent folder silently succeeded"

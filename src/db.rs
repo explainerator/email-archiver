@@ -177,7 +177,7 @@ pub async fn account_by_address(pool: &PgPool, address: &str) -> Result<Account>
 /// folder is rescanned from zero. Our own `uidnext` is untouched — the UIDs we
 /// serve to clients must never be reissued.
 pub async fn folder_for_ingest(
-    pool: &PgPool,
+    scope: &mut Scope<'_>,
     account_id: i64,
     name: &str,
     source_uidvalidity: i64,
@@ -188,7 +188,7 @@ pub async fn folder_for_ingest(
     )
     .bind(account_id)
     .bind(name)
-    .fetch_optional(pool)
+    .fetch_optional(scope.conn())
     .await?;
 
     if let Some((id, uidnext, existing_validity, last_uid)) = existing {
@@ -202,7 +202,7 @@ pub async fn folder_for_ingest(
             )
             .bind(id)
             .bind(source_uidvalidity)
-            .execute(pool)
+            .execute(scope.conn())
             .await?;
             return Ok(Folder {
                 id,
@@ -233,7 +233,7 @@ pub async fn folder_for_ingest(
     .bind(name)
     .bind(uidvalidity)
     .bind(source_uidvalidity)
-    .fetch_one(pool)
+    .fetch_one(scope.conn())
     .await
     .with_context(|| format!("creating folder {name}"))?;
 
@@ -247,8 +247,7 @@ pub async fn folder_for_ingest(
 
 #[allow(clippy::too_many_arguments)]
 pub async fn upsert_message(
-    pool: &PgPool,
-    user_id: i64,
+    scope: &mut Scope<'_>,
     blake3: &str,
     size: i64,
     internaldate: DateTime<Utc>,
@@ -258,6 +257,7 @@ pub async fn upsert_message(
     bodystructure: &serde_json::Value,
     headers: &[u8],
 ) -> Result<i64> {
+    let user_id = scope.user_id();
     // Deduplication is per user, matching the per-user buckets: the same
     // message arriving in two of one person's accounts is stored once.
     let id: i64 = sqlx::query_scalar(
@@ -278,7 +278,7 @@ pub async fn upsert_message(
     .bind(envelope)
     .bind(bodystructure)
     .bind(headers)
-    .fetch_one(pool)
+    .fetch_one(scope.conn())
     .await
     .context("inserting message")?;
     Ok(id)
@@ -291,19 +291,17 @@ pub async fn upsert_message(
 /// can rewrite the manifest, which is what makes a re-ingest repair missing or
 /// wrongly-keyed manifests instead of silently leaving them broken.
 pub async fn place_message(
-    pool: &PgPool,
+    scope: &mut Scope<'_>,
     folder_id: i64,
     message_id: i64,
     source_uid: i64,
     seen: bool,
 ) -> Result<(i64, bool)> {
-    let mut tx = pool.begin().await?;
-
     let already: Option<i64> =
         sqlx::query_scalar("SELECT uid FROM placements WHERE folder_id = $1 AND message_id = $2")
             .bind(folder_id)
             .bind(message_id)
-            .fetch_optional(&mut *tx)
+            .fetch_optional(scope.conn())
             .await?;
     if let Some(uid) = already {
         // Backfill source_uid if this row predates the column. Without this a
@@ -317,9 +315,8 @@ pub async fn place_message(
         .bind(folder_id)
         .bind(uid)
         .bind(source_uid)
-        .execute(&mut *tx)
+        .execute(scope.conn())
         .await?;
-        tx.commit().await?;
         return Ok((uid, false));
     }
 
@@ -328,7 +325,7 @@ pub async fn place_message(
         "UPDATE folders SET uidnext = uidnext + 1 WHERE id = $1 RETURNING uidnext - 1",
     )
     .bind(folder_id)
-    .fetch_one(&mut *tx)
+    .fetch_one(scope.conn())
     .await?;
 
     let inserted = sqlx::query(
@@ -343,7 +340,7 @@ pub async fn place_message(
     .bind(message_id)
     .bind(source_uid)
     .bind(seen)
-    .execute(&mut *tx)
+    .execute(scope.conn())
     .await?;
 
     // INSERT ... SELECT inserts NOTHING when the SELECT matches nothing, where
@@ -357,16 +354,19 @@ pub async fn place_message(
         inserted.rows_affected()
     );
 
-    tx.commit().await?;
     Ok((uid, true))
 }
 
 /// Record ingest progress. Only ever moves forward.
-pub async fn advance_source_uid(pool: &PgPool, folder_id: i64, source_uid: i64) -> Result<()> {
+pub async fn advance_source_uid(
+    scope: &mut Scope<'_>,
+    folder_id: i64,
+    source_uid: i64,
+) -> Result<()> {
     sqlx::query("UPDATE folders SET last_source_uid = GREATEST(last_source_uid, $2) WHERE id = $1")
         .bind(folder_id)
         .bind(source_uid)
-        .execute(pool)
+        .execute(scope.conn())
         .await?;
     Ok(())
 }
@@ -387,7 +387,8 @@ pub struct PlacementRow {
     pub size: i64,
 }
 
-pub async fn placements_for_user(pool: &PgPool, user_id: i64) -> Result<Vec<PlacementRow>> {
+pub async fn placements_for_user(scope: &mut Scope<'_>) -> Result<Vec<PlacementRow>> {
+    let user_id = scope.user_id();
     let rows: Vec<(
         String,
         String,
@@ -408,7 +409,7 @@ pub async fn placements_for_user(pool: &PgPool, user_id: i64) -> Result<Vec<Plac
              ORDER BY a.address, f.name, p.uid",
     )
     .bind(user_id)
-    .fetch_all(pool)
+    .fetch_all(scope.conn())
     .await?;
 
     Ok(rows
@@ -427,21 +428,22 @@ pub async fn placements_for_user(pool: &PgPool, user_id: i64) -> Result<Vec<Plac
 }
 
 /// How many messages we hold in one folder.
-pub async fn count_placements(pool: &PgPool, folder_id: i64) -> Result<i64> {
+pub async fn count_placements(scope: &mut Scope<'_>, folder_id: i64) -> Result<i64> {
     Ok(
         sqlx::query_scalar("SELECT count(*) FROM placements WHERE folder_id = $1")
             .bind(folder_id)
-            .fetch_one(pool)
+            .fetch_one(scope.conn())
             .await?,
     )
 }
 
 /// Messages for a user with no cached header block yet.
-pub async fn messages_missing_headers(pool: &PgPool, user_id: i64) -> Result<Vec<String>> {
+pub async fn messages_missing_headers(scope: &mut Scope<'_>) -> Result<Vec<String>> {
+    let user_id = scope.user_id();
     Ok(
         sqlx::query_scalar("SELECT blake3 FROM messages WHERE user_id = $1 AND headers IS NULL")
             .bind(user_id)
-            .fetch_all(pool)
+            .fetch_all(scope.conn())
             .await?,
     )
 }
@@ -882,12 +884,13 @@ pub async fn set_hierarchy_delimiter(
     Ok(())
 }
 
-pub async fn set_headers(pool: &PgPool, user_id: i64, blake3: &str, headers: &[u8]) -> Result<()> {
+pub async fn set_headers(scope: &mut Scope<'_>, blake3: &str, headers: &[u8]) -> Result<()> {
+    let user_id = scope.user_id();
     sqlx::query("UPDATE messages SET headers = $3 WHERE user_id = $1 AND blake3 = $2")
         .bind(user_id)
         .bind(blake3)
         .bind(headers)
-        .execute(pool)
+        .execute(scope.conn())
         .await?;
     Ok(())
 }

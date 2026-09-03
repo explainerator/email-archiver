@@ -25,9 +25,13 @@ pub async fn run(config: &Config, pool: &PgPool, login: &str, deep: bool) -> Res
 
     println!("checking {login} (bucket {bucket})");
 
+    // One scope for the whole check: every count below reads the policy-covered
+    // tables, and they should all see the same snapshot anyway.
+    let mut scope = db::Scope::begin(pool, user_id).await?;
+
     let messages: i64 = sqlx::query_scalar("SELECT count(*) FROM messages WHERE user_id = $1")
         .bind(user_id)
-        .fetch_one(pool)
+        .fetch_one(scope.conn())
         .await?;
 
     let placements: i64 = sqlx::query_scalar(
@@ -37,7 +41,7 @@ pub async fn run(config: &Config, pool: &PgPool, login: &str, deep: bool) -> Res
          WHERE a.user_id = $1",
     )
     .bind(user_id)
-    .fetch_one(pool)
+    .fetch_one(scope.conn())
     .await?;
 
     let store = Store::open(config, &bucket).await?;
@@ -81,14 +85,14 @@ pub async fn run(config: &Config, pool: &PgPool, login: &str, deep: bool) -> Res
     let hashes: Vec<String> = if deep {
         sqlx::query_scalar("SELECT blake3 FROM messages WHERE user_id = $1")
             .bind(user_id)
-            .fetch_all(pool)
+            .fetch_all(scope.conn())
             .await?
     } else {
         sqlx::query_scalar(
             "SELECT blake3 FROM messages WHERE user_id = $1 ORDER BY random() LIMIT 5",
         )
         .bind(user_id)
-        .fetch_all(pool)
+        .fetch_all(scope.conn())
         .await?
     };
 
@@ -157,7 +161,10 @@ pub async fn rebuild_manifests(config: &Config, pool: &PgPool, login: &str) -> R
     }
     println!("  purged {} stale manifest versions", stale.len());
 
-    let rows = db::placements_for_user(pool, user_id).await?;
+    let rows = {
+        let mut scope = db::Scope::begin(pool, user_id).await?;
+        db::placements_for_user(&mut scope).await?
+    };
     for row in &rows {
         store
             .put_manifest(&Manifest {
@@ -192,7 +199,10 @@ pub async fn backfill_headers(config: &Config, pool: &PgPool, login: &str) -> Re
             .await?
             .ok_or_else(|| anyhow::anyhow!("no such user {login:?}"))?;
 
-    let missing = db::messages_missing_headers(pool, user_id).await?;
+    let missing = {
+        let mut scope = db::Scope::begin(pool, user_id).await?;
+        db::messages_missing_headers(&mut scope).await?
+    };
     if missing.is_empty() {
         println!("headers: nothing to backfill for {login}");
         return Ok(());
@@ -210,7 +220,11 @@ pub async fn backfill_headers(config: &Config, pool: &PgPool, login: &str) -> Re
         let raw = store.get_message(hash).await?;
         let header = crate::fetch::split_header_body(&raw).0.to_vec();
         let len = header.len();
-        db::set_headers(pool, user_id, hash, &header).await?;
+        // A scope per message: these run concurrently under
+        // buffer_unordered, so they cannot share one transaction.
+        let mut scope = db::Scope::begin(pool, user_id).await?;
+        db::set_headers(&mut scope, hash, &header).await?;
+        scope.commit().await?;
         Ok(len)
     }))
     .buffer_unordered(concurrency)

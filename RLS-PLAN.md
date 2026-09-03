@@ -1,7 +1,6 @@
 # Row-Level Security for the archive
 
-Status: **phase 1 done, phase 2 partly done** (serving paths scoped; CLI paths
-outstanding). Phases 3-5 outstanding. Companion to `ARCHIVE-PLAN.md` and `WEBAPP-PLAN.md`.
+Status: **phases 1-2 done.** Phases 3-5 outstanding — no policy exists yet. Companion to `ARCHIVE-PLAN.md` and `WEBAPP-PLAN.md`.
 
 ---
 
@@ -122,12 +121,26 @@ database. The denormalised column cannot drift.
 
 ## 4. Which tables get RLS
 
-**`accounts`, `folders`, `messages`, `placements`.** All four hold mail or its structure.
+**`folders`, `messages`, `placements`.** These three hold mail and its structure, and all
+three now carry `user_id` directly (§3), so each policy is one column comparison.
 
 **`users` deliberately does not.** Authentication has to find a row *before* an identity
 exists — `db::authenticate` searches by login, with no user to scope to. A policy there
 would have to be permissive enough to allow that, which would make it decorative. The table
 holds password hashes and bucket names, no mail, and the hashes are Argon2id.
+
+**`accounts` deliberately does not either — changed from the original draft.** The same
+bootstrap problem, found while converting the CLI: `email-archiver ingest <address>` starts
+from an address and has to discover *which user owns it* before it can declare an identity.
+A policy on `accounts` makes that lookup return nothing, and the only ways round it are
+worse than the protection is worth — a policy that permits reads when no identity is set
+would mean a forgotten scope reads every account, which is precisely the failure mode this
+whole exercise exists to remove.
+
+What is given up is small and worth stating: `accounts` holds addresses, labels, hierarchy
+delimiters and **encrypted** source-mailbox credentials. No message bodies, no subjects, no
+senders. The question this plan answers is whether one user's *mail* can reach another, and
+mail lives in the three tables above.
 
 `_sqlx_migrations` likewise: no user data, and migrations run before any identity is set.
 
@@ -203,7 +216,7 @@ Each phase is independently deployable and leaves the system working.
 | Phase | Work | Gate |
 |---|---|---|
 | **1** | ✅ Migration: `user_id` on `folders` and `placements`, backfilled, with the composite FK of §3. **No RLS yet.** | Done — 152,741 placements and 46 folders backfilled, zero nulls, zero mismatches; a deliberate wrong-owner update is rejected by the FK |
-| **2** | ✅ Serving paths (web + IMAP) · ⬜ CLI paths (ingest, check, diagnose) | Web and IMAP reads all go through `db::Scope`. **The CLI paths must follow before phase 3**, or enabling RLS will break ingest |
+| **2** | ✅ `db::Scope` helper; every query on a policy-covered table routed through it | Done — web, IMAP, ingest, check and diagnose. Audited: no `fetch`/`execute` on a pool remains for `folders`, `messages` or `placements` |
 | **3** | Enable RLS + FORCE + policy on **`accounts` only** — the smallest table, and the one whose breakage is most obvious | Login, folder list and ingest all still work |
 | **4** | The same on `folders`, `messages`, `placements` | Full app exercised: browse, read, search, download, ingest |
 | **5** | Verification: no-identity queries return zero rows; a second user's ids return zero rows; startup self-check | Tests assert the policy, not just the `WHERE` clause |

@@ -322,7 +322,12 @@ async fn ingest_folder(
 
     let uid_validity = mailbox.uid_validity.unwrap_or(0) as i64;
     let source_exists = mailbox.exists as i64;
-    let folder = db::folder_for_ingest(pool, account.id, name, uid_validity).await?;
+    let folder = {
+        let mut scope = db::Scope::begin(pool, account.user_id).await?;
+        let folder = db::folder_for_ingest(&mut scope, account.id, name, uid_validity).await?;
+        scope.commit().await?;
+        folder
+    };
 
     let range = format!("{}:*", folder.last_source_uid + 1);
     let mut new_messages = 0usize;
@@ -437,7 +442,11 @@ async fn ingest_folder(
         // in the batch has its database row — an interruption re-fetches the
         // batch, which is idempotent.
         let batch_max = chunk.iter().copied().max().unwrap_or(0);
-        db::advance_source_uid(pool, folder.id, batch_max as i64).await?;
+        {
+            let mut scope = db::Scope::begin(pool, account.user_id).await?;
+            db::advance_source_uid(&mut scope, folder.id, batch_max as i64).await?;
+            scope.commit().await?;
+        }
 
         // Progress, not a summary: a large mailbox is many batches and this is
         // the only sign of life during a long run. Counts are cumulative for
@@ -454,7 +463,10 @@ async fn ingest_folder(
     // Holding MORE than the source is normal and expected — the archive keeps
     // messages the source has since deleted. Holding FEWER means mail on the
     // server never made it here, which is the failure that matters.
-    let held = db::count_placements(pool, folder.id).await?;
+    let held = {
+        let mut scope = db::Scope::begin(pool, account.user_id).await?;
+        db::count_placements(&mut scope, folder.id).await?
+    };
     if held < source_exists {
         // Deliberately does not claim the mail is missing. A shortfall is
         // usually byte-identical duplicates collapsing into one placement,
@@ -505,9 +517,12 @@ async fn store_message(
     // 1. message bytes, 2. manifest, 3. index rows. See module docs.
     let hash = store.put_message(raw).await?;
 
+    // One scope for the message row and its placement, so both land or
+    // neither does -- the same transaction boundary place_message used to open
+    // for itself, now shared with the upsert.
+    let mut scope = db::Scope::begin(pool, account.user_id).await?;
     let message_id = db::upsert_message(
-        pool,
-        account.user_id,
+        &mut scope,
         &hash,
         raw.len() as i64,
         indexed.internaldate,
@@ -522,7 +537,13 @@ async fn store_message(
     .await?;
 
     let (uid, is_new) =
-        db::place_message(pool, folder.id, message_id, source_uid as i64, seen).await?;
+        db::place_message(&mut scope, folder.id, message_id, source_uid as i64, seen).await?;
+
+    // Both rows committed together. Before this the upsert and the placement
+    // were separate transactions, so an interruption between them left a
+    // message row with no placement -- invisible to every client and
+    // indistinguishable from mail that never arrived.
+    scope.commit().await?;
 
     // Written unconditionally, even when the placement already existed. The
     // manifest is derived data; rewriting it is cheap and makes a re-ingest

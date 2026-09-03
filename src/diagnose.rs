@@ -22,6 +22,11 @@ use crate::ingest;
 
 pub async fn run(config: &Config, pool: &PgPool, address: &str, folder: &str) -> Result<()> {
     let account = db::account_by_address(pool, address).await?;
+
+    // accounts carries no policy (RLS-PLAN section 4), which is what lets the
+    // lookup above resolve an address to its owner before an identity exists.
+    // Everything after this reads the policy-covered tables.
+    let mut scope = db::Scope::begin(pool, account.user_id).await?;
     let key = config.key()?;
     let source = db::source_for(pool, &key, address).await?;
 
@@ -47,7 +52,7 @@ pub async fn run(config: &Config, pool: &PgPool, address: &str, folder: &str) ->
     )
     .bind(account.id)
     .bind(folder)
-    .fetch_all(pool)
+    .fetch_all(scope.conn())
     .await?;
     let ours: std::collections::HashSet<i64> = ours.into_iter().collect();
 
@@ -97,7 +102,7 @@ pub async fn run(config: &Config, pool: &PgPool, address: &str, folder: &str) ->
             .bind(account.id)
             .bind(folder)
             .bind(&hash)
-            .fetch_optional(pool)
+            .fetch_optional(scope.conn())
             .await?;
 
             match placed_here {
