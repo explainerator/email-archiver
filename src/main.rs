@@ -65,9 +65,18 @@ USAGE:
     email-archiver remove-google <domain>
         Forget a domain's service account key.
 
+    email-archiver users
+        List archive users: primary address, aliases, bucket, and how much mail
+        each holds.
+
+    email-archiver accounts <user email>
+        List the source mailboxes feeding one user's archive, with the folder
+        label each uses and how it authenticates.
+
     email-archiver sources
-        List every configured source: Workspace domains, and each account with
-        how it authenticates. Flags accounts registered but not yet usable.
+        List every configured source across all users: Workspace domains, and
+        each account with how it authenticates. Flags accounts registered but
+        not yet usable.
 
     email-archiver check <email> [--deep]
         Verify Postgres and S3 agree for one user. Samples 5 blobs by default;
@@ -241,6 +250,57 @@ async fn main() -> Result<()> {
                     "  WARNING: certificate verification disabled for {host} — encrypted, \
                      but the server is NOT authenticated"
                 );
+            }
+            Ok(())
+        }
+
+        Some("users") => {
+            let pool = connect_db(&config).await?;
+            let users = db::all_users(&pool).await?;
+
+            if users.is_empty() {
+                println!("no users yet — add one with: email add-user <email> <bucket>");
+                return Ok(());
+            }
+
+            for user in &users {
+                println!(
+                    "{:34} {:22} {:>9} messages  {} account(s)",
+                    user.login, user.display_name, user.messages, user.accounts
+                );
+                println!("  bucket  {}", user.bucket);
+                if !user.aliases.is_empty() {
+                    println!("  aliases {}", user.aliases.join(", "));
+                }
+            }
+            Ok(())
+        }
+
+        Some("accounts") => {
+            let login = arg(&args, 1, "user email")?;
+            let pool = connect_db(&config).await?;
+            let (user_id, bucket) = db::user_by_login(&pool, &login)
+                .await?
+                .with_context(|| format!("no user with login {login:?}"))?;
+
+            let accounts = db::accounts_for_user(&pool, user_id).await?;
+            if accounts.is_empty() {
+                println!(
+                    "{login} has no source accounts — add one with:                      email add-account {login} <address> <label> <imap|gmail>"
+                );
+                return Ok(());
+            }
+
+            println!("{login} -> bucket {bucket}");
+            for (address, label, provider, host, configured) in &accounts {
+                // The label is what prefixes this account's folders in the
+                // archive, so it is worth showing next to the address.
+                let how = match (provider.as_str(), configured) {
+                    ("gmail", _) => "google (domain key)".to_string(),
+                    (_, true) => host.clone().unwrap_or_default(),
+                    (_, false) => "NO CREDENTIALS — set-source".to_string(),
+                };
+                println!("  {address:32} {label:12} {how}");
             }
             Ok(())
         }

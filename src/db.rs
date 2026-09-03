@@ -211,6 +211,80 @@ pub async fn google_domains(pool: &PgPool) -> Result<Vec<(String, String)>> {
     Ok(rows)
 }
 
+/// Every archive user, for `users`.
+///
+/// Reads `users` and `user_logins`, neither of which carries a policy --
+/// authentication has to resolve a login before there is an identity to scope
+/// by. Message counts do need a scope, so they are fetched per user.
+pub async fn all_users(pool: &PgPool) -> Result<Vec<UserSummary>> {
+    let rows: Vec<(i64, String, Option<String>, String)> = sqlx::query_as(
+        "SELECT u.id, l.login, u.display_name, u.bucket
+           FROM users u
+           JOIN user_logins l ON l.user_id = u.id AND l.is_primary
+          ORDER BY l.login",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut users = Vec::new();
+    for (id, login, display_name, bucket) in rows {
+        let aliases: Vec<String> = sqlx::query_scalar(
+            "SELECT login FROM user_logins WHERE user_id = $1 AND NOT is_primary ORDER BY login",
+        )
+        .bind(id)
+        .fetch_all(pool)
+        .await?;
+
+        // Scoped, because messages is policy-covered. One extra round trip per
+        // user on a handful of users.
+        let mut scope = Scope::begin(pool, id).await?;
+        let messages: i64 = sqlx::query_scalar("SELECT count(*) FROM messages")
+            .fetch_one(scope.conn())
+            .await?;
+        let accounts: i64 = sqlx::query_scalar("SELECT count(*) FROM accounts")
+            .fetch_one(scope.conn())
+            .await?;
+        drop(scope);
+
+        users.push(UserSummary {
+            login,
+            display_name: display_name.unwrap_or_default(),
+            bucket,
+            aliases,
+            accounts,
+            messages,
+        });
+    }
+
+    Ok(users)
+}
+
+pub struct UserSummary {
+    pub login: String,
+    pub display_name: String,
+    pub bucket: String,
+    pub aliases: Vec<String>,
+    pub accounts: i64,
+    pub messages: i64,
+}
+
+/// One user's source accounts, for `accounts <email>`.
+pub async fn accounts_for_user(
+    pool: &PgPool,
+    user_id: i64,
+) -> Result<Vec<(String, String, String, Option<String>, bool)>> {
+    let mut scope = Scope::begin(pool, user_id).await?;
+    let rows = sqlx::query_as(
+        "SELECT address, label, provider, imap_host,
+                (imap_host IS NOT NULL AND imap_password_enc IS NOT NULL)
+           FROM accounts ORDER BY address",
+    )
+    .fetch_all(scope.conn())
+    .await?;
+
+    Ok(rows)
+}
+
 /// Every account and how it authenticates, for `sources`.
 ///
 /// Returns whether credentials are actually present rather than the

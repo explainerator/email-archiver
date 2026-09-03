@@ -79,15 +79,27 @@ async fn cleanup(pool: &sqlx::PgPool) {
         Err(e) => eprintln!("cleanup could not open a scope: {e}"),
     }
 
-    // `users` is the only table left with no policy, so it is the only delete
-    // that can run unscoped.
-    if let Err(e) = sqlx::query("DELETE FROM users WHERE id = $1")
-        .bind(id)
-        .execute(pool)
-        .await
-    {
-        eprintln!("cleanup failed to delete the user: {e}");
+    // `user_logins` and `users` carry no policy, so these run unscoped. Logins
+    // first: they hold a foreign key to users, and forgetting them is exactly
+    // how a probe user survived migration 0011 -- the delete failed, the error
+    // was only printed, and the row sat in `email users` output afterwards.
+    for sql in [
+        "DELETE FROM user_logins WHERE user_id = $1",
+        "DELETE FROM users       WHERE id = $1",
+    ] {
+        if let Err(e) = sqlx::query(sql).bind(id).execute(pool).await {
+            eprintln!("cleanup failed on {sql}: {e}");
+        }
     }
+
+    // Assert rather than hope. A cleanup that quietly fails leaves a user in a
+    // production table and is invisible until someone lists them.
+    let survivors: i64 = sqlx::query_scalar("SELECT count(*) FROM users WHERE id = $1")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0);
+    assert_eq!(survivors, 0, "cleanup left the probe user behind");
 }
 
 #[tokio::test]
