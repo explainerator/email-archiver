@@ -198,6 +198,22 @@ ingest will not start.
 
 ---
 
+## 5a. When a source will not connect
+
+```
+email probe <address>
+```
+
+Shows the raw IMAP conversation — greeting, authentication, folder listing — with every
+read on a deadline, so a server that goes quiet produces an error rather than a hang. It
+resolves the source exactly as ingest does, including the certificate policy, so it cannot
+succeed where ingest would fail.
+
+For Gmail it decodes the base64 error challenges, which is where Google puts the actual
+reason and which is otherwise unreadable.
+
+---
+
 ## 6. Reading the database by hand
 
 psql and DBeaver connect as `gern` and are subject to the same row-level policies as the
@@ -225,6 +241,7 @@ connection and wants the setting to persist.
 | A service will not start after a migration | Instance binary predates the schema | `deploy email-archiver` |
 | Everything reads empty in the app | A code path is not declaring an identity | Not a data loss — check `email check <user>`, then the logs |
 | Ingest stops partway | Network blip | Re-run it; ingest is resumable |
+| Ingest hangs with no output after `ingesting …` | The IMAP conversation stalled | `email probe <address>` — prints what the server actually said |
 | Folder shows fewer messages than the source | Usually byte-identical duplicates collapsing | `email diagnose <address> <folder>` |
 
 **An empty archive is not lost data.** Every policy-covered read returns nothing when the

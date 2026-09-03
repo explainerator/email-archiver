@@ -23,6 +23,7 @@ pub mod gmail;
 pub mod ingest;
 pub mod listen;
 pub mod naming;
+pub mod probe;
 pub mod ratelimit;
 pub mod sanitise;
 pub mod secrets;

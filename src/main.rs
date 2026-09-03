@@ -5,7 +5,7 @@
 
 use anyhow::{Context, Result};
 use email_archiver::config::Config;
-use email_archiver::{check, db, diagnose, gmail, ingest, secrets, server, web};
+use email_archiver::{check, db, diagnose, gmail, ingest, probe, secrets, server, web};
 use email_archiver::{connect_db, EXPECTED_DATABASE};
 
 const USAGE: &str = "\
@@ -110,6 +110,12 @@ USAGE:
     email-archiver backfill-headers <email>
         Cache header blocks for messages archived before that column existed.
         Purely an optimisation; safe to interrupt and resume.
+
+    email-archiver probe <address>
+        Show the raw IMAP conversation with a source server: greeting,
+        authentication, and a folder listing, with every read on a deadline.
+        Use when ingest fails or hangs -- it prints what the server actually
+        said, including Gmail's base64 error challenges, decoded.
 
     email-archiver diagnose <address> <folder>
         Explain a folder's completeness gap: which absent source UIDs are
@@ -457,6 +463,12 @@ async fn main() -> Result<()> {
             let login = arg(&args, 1, "login")?;
             let pool = connect_db(&config).await?;
             check::backfill_headers(&config, &pool, &login).await
+        }
+
+        Some("probe") => {
+            let address = arg(&args, 1, "address")?;
+            let pool = connect_db(&config).await?;
+            probe::run(&config, &pool, &address).await
         }
 
         Some("diagnose") => {

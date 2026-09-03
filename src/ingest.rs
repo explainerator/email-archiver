@@ -158,7 +158,12 @@ pub async fn connect_session(source: &Source) -> Result<Session> {
     connect(source).await
 }
 
-async fn connect(source: &Source) -> Result<Session> {
+/// TLS settings for one source, including its certificate policy.
+///
+/// Shared with `probe` so the diagnostic connects exactly as ingest does. A
+/// probe that trusted different certificates could succeed where the real thing
+/// fails, which is worse than no probe.
+pub fn tls_config_for(source: &Source) -> Result<ClientConfig> {
     let tls_config = if source.allow_invalid_certs {
         // Loud, and on stderr: a run that silently stopped authenticating the
         // server should not look like a normal one in a log read months later.
@@ -181,21 +186,43 @@ async fn connect(source: &Source) -> Result<Session> {
             .with_root_certificates(roots)
             .with_no_client_auth()
     };
+
+    Ok(tls_config)
+}
+
+/// Every network step below has a deadline.
+///
+/// None of them did, and a Gmail handshake that stalled mid-SASL hung an entire
+/// import with no output: the connection was established, the server said
+/// nothing, and both sides waited indefinitely. A source that stops answering
+/// must fail rather than wait.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(60);
+
+async fn connect(source: &Source) -> Result<Session> {
+    let tls_config = tls_config_for(source)?;
     let connector = TlsConnector::from(Arc::new(tls_config));
 
-    let tcp = TcpStream::connect((source.host.as_str(), source.port))
-        .await
-        .with_context(|| format!("connecting to {}:{}", source.host, source.port))?;
+    let tcp = tokio::time::timeout(
+        CONNECT_TIMEOUT,
+        TcpStream::connect((source.host.as_str(), source.port)),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("timed out connecting to {}:{}", source.host, source.port))?
+    .with_context(|| format!("connecting to {}:{}", source.host, source.port))?;
 
     let domain = ServerName::try_from(source.host.clone())
         .with_context(|| format!("invalid hostname {:?}", source.host))?;
-    let tls = connector
-        .connect(domain, tcp)
+    let tls = tokio::time::timeout(CONNECT_TIMEOUT, connector.connect(domain, tcp))
         .await
+        .map_err(|_| anyhow::anyhow!("timed out in the TLS handshake with {}", source.host))?
         .context("TLS handshake failed")?;
 
     let client = async_imap::Client::new(tls);
 
+    // The authentication exchange gets its own, longer deadline: this is where
+    // the Gmail stall happened -- inside SASL, not at connect time.
+    tokio::time::timeout(HANDSHAKE_TIMEOUT, async move {
     match &source.auth {
         crate::config::Auth::Password(password) => client
             .login(&source.username, password)
@@ -219,21 +246,35 @@ async fn connect(source: &Source) -> Result<Session> {
                 })
         }
     }
+    })
+    .await
+    .map_err(|_| {
+        anyhow::anyhow!(
+            "authentication to {} did not finish within {}s -- the connection was open and              the server stopped answering. `email probe {}` shows the exchange.",
+            source.host,
+            HANDSHAKE_TIMEOUT.as_secs(),
+            source.username
+        )
+    })?
 }
 
 /// Ingest every folder of one account.
-pub async fn run(config: &Config, pool: &PgPool, address: &str) -> Result<()> {
-    // accounts is policy-covered, so the owner has to be resolved first --
-    // through `users`, which is not. See db::owner_of_address.
+/// Build the connection settings for one address.
+///
+/// Extracted so `probe` resolves a source exactly as ingest does -- the
+/// provider decides how to authenticate, and a diagnostic that guessed
+/// differently would be diagnosing something other than the real path.
+pub async fn source_for_address(
+    config: &Config,
+    pool: &PgPool,
+    address: &str,
+) -> Result<crate::config::Source> {
     let owner = db::owner_of_address(pool, address).await?;
     let account = {
         let mut scope = db::Scope::begin(pool, owner).await?;
         db::account_by_address(&mut scope, address).await?
     };
-    // The provider decides how we authenticate, which is the whole reason that
-    // column exists. Generic IMAP uses stored credentials; Google Workspace
-    // mints a short-lived token from the service account instead, so those
-    // accounts have no host or password recorded at all.
+
     let source = match account.provider.as_str() {
         "gmail" => {
             // Keyed by domain: one service account is delegated for a whole
@@ -245,12 +286,12 @@ pub async fn run(config: &Config, pool: &PgPool, address: &str) -> Result<()> {
 
             let key = config.key()?;
             let key_json = db::google_domain(pool, &key, domain)
-                .await?
-                .with_context(|| {
-                    format!(
-                        "no Google service account is configured for {domain}. Add one with: email set-google {domain} /path/to/service-account.json"
-                    )
-                })?;
+            .await?
+            .with_context(|| {
+                format!(
+                    "no Google service account is configured for {domain}. Add one with: email set-google {domain} /path/to/service-account.json"
+                )
+            })?;
 
             let account = crate::gmail::ServiceAccount::parse(&key_json, domain)?;
             let tokens = crate::gmail::AccessTokens::new(account);
@@ -271,6 +312,23 @@ pub async fn run(config: &Config, pool: &PgPool, address: &str) -> Result<()> {
             db::source_for(pool, &key, address).await?
         }
     };
+
+    Ok(source)
+}
+
+pub async fn run(config: &Config, pool: &PgPool, address: &str) -> Result<()> {
+    // accounts is policy-covered, so the owner has to be resolved first --
+    // through `users`, which is not. See db::owner_of_address.
+    let owner = db::owner_of_address(pool, address).await?;
+    let account = {
+        let mut scope = db::Scope::begin(pool, owner).await?;
+        db::account_by_address(&mut scope, address).await?
+    };
+    // The provider decides how we authenticate, which is the whole reason that
+    // column exists. Generic IMAP uses stored credentials; Google Workspace
+    // mints a short-lived token from the service account instead, so those
+    // accounts have no host or password recorded at all.
+    let source = source_for_address(config, pool, address).await?;
     // Arc so every concurrent task shares one S3 client and its connection pool.
     let store = Arc::new(Store::open(config, &account.bucket).await?);
 
