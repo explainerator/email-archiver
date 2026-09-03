@@ -39,21 +39,17 @@ pub struct Config {
     pub ingest: Ingest,
     #[serde(default)]
     pub tls: Tls,
-    #[serde(default)]
-    pub gmail: Gmail,
 }
 
-/// Google Workspace ingest. Absent unless there are Workspace mailboxes.
-#[derive(Deserialize, Default)]
-pub struct Gmail {
-    /// Path to the service account JSON key, with domain-wide delegation
-    /// granted for `https://mail.google.com/`. See src/gmail.rs for the setup.
-    ///
-    /// One key serves every mailbox in the domain, so this is global rather
-    /// than per-account. A second Workspace domain would need a second key and
-    /// a change here.
-    pub service_account_key: Option<String>,
-}
+// Source credentials are NOT here. Generic IMAP hosts and passwords live in
+// `accounts` (migration 0005) and Google service account keys in
+// `google_domains` (migration 0012), both encrypted with `encryption_key`.
+//
+// This file holds only what the archive needs to reach ITS OWN storage --
+// Postgres and S3 -- plus the key that decrypts everything else. A source
+// credential here would have to be correct on every machine that runs ingest,
+// and this file is Terraform-rendered, so it would have to be correct for a
+// workstation and the instance at the same time.
 
 /// How ingest authenticates to a source mailbox.
 ///

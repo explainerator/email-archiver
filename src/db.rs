@@ -124,6 +124,124 @@ pub fn looks_like_email(login: &str) -> bool {
         && !login.chars().any(char::is_whitespace)
 }
 
+/// Open a transaction permitted to touch `google_domains`.
+///
+/// The table's policy is break-glass: readable only by a transaction that has
+/// asked for it. Ingest asks; the IMAP and web servers never do, so a bug in
+/// either cannot reach a credential that unlocks every mailbox in the domain.
+///
+/// Deliberately a separate function rather than a flag on `Scope`, so reaching
+/// this data is a visible, greppable act rather than an argument someone could
+/// pass without noticing.
+async fn google_scope(pool: &PgPool) -> Result<sqlx::Transaction<'_, sqlx::Postgres>> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("SELECT set_config('archive.google_access', 'yes', true)")
+        .execute(&mut *tx)
+        .await
+        .context("requesting access to the Google credential table")?;
+    Ok(tx)
+}
+
+/// Store a service account key for a Workspace domain, encrypted.
+pub async fn set_google_domain(
+    pool: &PgPool,
+    key: &crate::secrets::SecretKey,
+    domain: &str,
+    client_email: &str,
+    key_json: &str,
+) -> Result<()> {
+    let mut tx = google_scope(pool).await?;
+    sqlx::query(
+        "INSERT INTO google_domains (domain, client_email, key_enc)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (domain)
+             DO UPDATE SET client_email = EXCLUDED.client_email,
+                           key_enc      = EXCLUDED.key_enc",
+    )
+    .bind(domain)
+    .bind(client_email)
+    .bind(key.encrypt(key_json)?)
+    .execute(&mut *tx)
+    .await
+    .with_context(|| format!("storing the service account key for {domain}"))?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// The decrypted service account key for a domain, if one is configured.
+pub async fn google_domain(
+    pool: &PgPool,
+    key: &crate::secrets::SecretKey,
+    domain: &str,
+) -> Result<Option<String>> {
+    let mut tx = google_scope(pool).await?;
+    let row: Option<(String,)> =
+        sqlx::query_as("SELECT key_enc FROM google_domains WHERE domain = $1")
+            .bind(domain)
+            .fetch_optional(&mut *tx)
+            .await?;
+    drop(tx);
+
+    match row {
+        Some((enc,)) => Ok(Some(key.decrypt(&enc)?)),
+        None => Ok(None),
+    }
+}
+
+pub async fn remove_google_domain(pool: &PgPool, domain: &str) -> Result<()> {
+    let mut tx = google_scope(pool).await?;
+    let affected = sqlx::query("DELETE FROM google_domains WHERE domain = $1")
+        .bind(domain)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    tx.commit().await?;
+
+    anyhow::ensure!(affected == 1, "no Google domain {domain:?} is configured");
+    Ok(())
+}
+
+/// Configured Workspace domains, for `sources`. Never returns the key itself.
+pub async fn google_domains(pool: &PgPool) -> Result<Vec<(String, String)>> {
+    let mut tx = google_scope(pool).await?;
+    let rows: Vec<(String, String)> =
+        sqlx::query_as("SELECT domain, client_email FROM google_domains ORDER BY domain")
+            .fetch_all(&mut *tx)
+            .await?;
+    Ok(rows)
+}
+
+/// Every account and how it authenticates, for `sources`.
+///
+/// Returns whether credentials are actually present rather than the
+/// credentials themselves: the point is to show what is configured and what is
+/// merely registered, not to hand back secrets.
+pub async fn all_sources(
+    pool: &PgPool,
+) -> Result<Vec<(String, String, String, Option<String>, bool)>> {
+    let users: Vec<i64> = sqlx::query_scalar("SELECT id FROM users ORDER BY id")
+        .fetch_all(pool)
+        .await?;
+
+    // accounts is policy-covered, so this walks the users rather than reading
+    // the table directly -- the same bootstrap owner_of_address uses.
+    let mut all = Vec::new();
+    for user_id in users {
+        let mut scope = Scope::begin(pool, user_id).await?;
+        let rows: Vec<(String, String, String, Option<String>, bool)> = sqlx::query_as(
+            "SELECT address, label, provider, imap_host,
+                    (imap_host IS NOT NULL AND imap_password_enc IS NOT NULL)
+               FROM accounts ORDER BY address",
+        )
+        .fetch_all(scope.conn())
+        .await?;
+        drop(scope);
+        all.extend(rows);
+    }
+
+    Ok(all)
+}
+
 /// The user a login belongs to, and their bucket.
 ///
 /// The single place a login becomes a user. Every command that names an

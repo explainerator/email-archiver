@@ -567,6 +567,29 @@ conventional work.
 
 ---
 
+### 8a.0 Source credentials live in the database, not the config
+
+Every credential ingest needs is in Postgres, encrypted with `encryption_key`:
+generic IMAP hosts and passwords in `accounts` (migration 0005), Google Workspace
+service account keys in `google_domains` (migration 0012).
+
+`config.toml` holds only what the archive needs to reach *its own* storage — Postgres and
+S3 — plus the key that decrypts everything else. A source credential there would have to
+be correct on every machine that runs ingest, and that file is Terraform-rendered and
+delivered to the instance, so it would have to be correct for a workstation and the server
+at once. Credentials belong to the archive, not to a machine.
+
+`email sources` lists what is configured, and flags accounts that are registered but have
+no credentials yet.
+
+**The Google key gets a different kind of policy.** It can read every mailbox in its
+domain, so no `user_id` predicate fits — the mailboxes it unlocks may belong to different
+archive users. Its RLS policy is break-glass instead: readable only by a transaction that
+explicitly asks (`archive.google_access`). Ingest asks; the IMAP and web servers never do
+and have no code that would, so a bug in either cannot reach it despite connecting as the
+same role with the same encryption key in memory. Weaker than a policy derived from who is
+asking, and the strongest available for a secret that genuinely is not per-user.
+
 ### 8a.1 Google Workspace setup — what only you can do
 
 The code is written and tested; none of it can run until the Google side exists.
@@ -584,8 +607,14 @@ The code is written and tested; none of it can run until the Google side exists.
    https://mail.google.com/
    ```
 
-5. Set `gmail_service_account_key` in `terraform.tfvars` to the JSON key's path
-   and re-render `config.toml`.
+5. Store the key in the archive:
+
+   ```
+   email set-google thebackroom420.ca /path/to/service-account.json
+   ```
+
+   It is read once and kept encrypted in the database; the file is not needed
+   afterwards and should not be left lying about.
 
 Step 4 is the one that is easy to skip, because everything up to it succeeds
 without it. Its symptom is a token request rejected with `unauthorized_client`,

@@ -78,16 +78,24 @@ impl std::fmt::Debug for ServiceAccount {
 }
 
 impl ServiceAccount {
+    /// Parse a key. `source` only names the origin for error messages.
+    pub fn parse(json: &str, source: &str) -> Result<Self> {
+        let account: ServiceAccount = serde_json::from_str(json)
+            .with_context(|| format!("parsing {source} as a Google service account key"))?;
+        anyhow::ensure!(
+            !account.private_key.is_empty(),
+            "{source} has no private_key; is it a service account key rather than an OAuth client?"
+        );
+        Ok(account)
+    }
+
+    /// Read a key from a file. Used once, by `set-google`, to put it in the
+    /// database; ingest reads it from there afterwards so the file need not
+    /// exist on whichever machine runs the import.
     pub fn load(path: &str) -> Result<Self> {
         let raw = std::fs::read_to_string(path)
             .with_context(|| format!("reading the service account key {path}"))?;
-        let account: ServiceAccount = serde_json::from_str(&raw)
-            .with_context(|| format!("parsing {path} as a Google service account key"))?;
-        anyhow::ensure!(
-            !account.private_key.is_empty(),
-            "{path} has no private_key; is it a service account key rather than an OAuth client?"
-        );
-        Ok(account)
+        Self::parse(&raw, path)
     }
 }
 

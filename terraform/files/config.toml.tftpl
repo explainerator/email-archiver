@@ -62,14 +62,12 @@ cert_path = "${tls_cert_path}"
 key_path  = "${tls_key_path}"
 %{ endif ~}
 
-# ----------------------------------------------------------------------------
-# Google Workspace ingest.
+# Source credentials are deliberately NOT in this file.
 #
-# One service account with domain-wide delegation serves every mailbox in the
-# domain, so there is nothing per-account to configure and no refresh token to
-# store or expire. Absent unless there are Workspace mailboxes to ingest.
-# ----------------------------------------------------------------------------
-%{ if gmail_service_account_key != "" ~}
-[gmail]
-service_account_key = "${gmail_service_account_key}"
-%{ endif ~}
+# Generic IMAP hosts and passwords live in the `accounts` table; Google
+# Workspace service account keys live in `google_domains`. Both encrypted with
+# the key above, both managed with `email set-source` / `email set-google`.
+#
+# This file is rendered by Terraform and delivered to the instance, so anything
+# in it has to be correct for both a workstation running ingest and the server.
+# A source credential is neither -- it belongs to the archive, not to a machine.

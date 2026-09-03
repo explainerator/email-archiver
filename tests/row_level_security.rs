@@ -249,3 +249,38 @@ async fn the_address_bootstrap_still_works() {
         .expect("owner_of_address must resolve a real address");
     assert!(owner > 0);
 }
+
+#[tokio::test]
+async fn the_google_key_needs_break_glass() {
+    // google_domains holds a credential that can read EVERY mailbox in a
+    // Workspace domain, so no user_id predicate fits it -- the mailboxes it
+    // unlocks may belong to different archive users. Its policy is opt-in
+    // instead: only a transaction that asks for access gets any.
+    //
+    // Ingest asks. The IMAP server and the web server never do and have no code
+    // that would, so a bug in either cannot reach it despite connecting as the
+    // same role with the same encryption key in memory.
+    let Some(pool) = pool().await else { return };
+
+    let visible: i64 = sqlx::query_scalar("SELECT count(*) FROM google_domains")
+        .fetch_one(&pool)
+        .await
+        .expect("unscoped read of google_domains");
+    assert_eq!(
+        visible, 0,
+        "the Google key is readable without asking for it"
+    );
+
+    // Writing without asking must fail too, or a key could be planted that
+    // nothing could later see.
+    let planted = sqlx::query(
+        "INSERT INTO google_domains (domain, client_email, key_enc)
+         VALUES ('rls-probe.invalid', 'probe@invalid', 'x')",
+    )
+    .execute(&pool)
+    .await;
+    assert!(
+        planted.is_err() || planted.unwrap().rows_affected() == 0,
+        "a Google key was inserted without break-glass access"
+    );
+}

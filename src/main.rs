@@ -5,7 +5,7 @@
 
 use anyhow::{Context, Result};
 use email_archiver::config::Config;
-use email_archiver::{check, db, diagnose, ingest, secrets, server, web};
+use email_archiver::{check, db, diagnose, gmail, ingest, secrets, server, web};
 use email_archiver::{connect_db, EXPECTED_DATABASE};
 
 const USAGE: &str = "\
@@ -52,8 +52,22 @@ USAGE:
         cover a string you cannot retype.
 
     email-archiver set-source <address> <host> <username> [--insecure-tls]
-        Store source mailbox credentials, encrypted. Prompts for the password.
-        --insecure-tls accepts any certificate for THIS source only.
+        Store generic IMAP credentials for a source mailbox, encrypted. Prompts
+        for the password. --insecure-tls accepts any certificate for THIS
+        source only.
+
+    email-archiver set-google <domain> <service-account.json>
+        Store a Google Workspace service account key for a whole domain,
+        encrypted. One key covers every mailbox in the domain, so Workspace
+        accounts need no set-source. The file is only read once; afterwards the
+        key lives in the database.
+
+    email-archiver remove-google <domain>
+        Forget a domain's service account key.
+
+    email-archiver sources
+        List every configured source: Workspace domains, and each account with
+        how it authenticates. Flags accounts registered but not yet usable.
 
     email-archiver check <email> [--deep]
         Verify Postgres and S3 agree for one user. Samples 5 blobs by default;
@@ -227,6 +241,65 @@ async fn main() -> Result<()> {
                     "  WARNING: certificate verification disabled for {host} — encrypted, \
                      but the server is NOT authenticated"
                 );
+            }
+            Ok(())
+        }
+
+        Some("set-google") => {
+            let domain = arg(&args, 1, "domain")?;
+            let path = arg(&args, 2, "path to the service account JSON key")?;
+            let account = gmail::ServiceAccount::load(&path)?;
+            let json = std::fs::read_to_string(&path)?;
+            let pool = connect_db(&config).await?;
+            db::set_google_domain(&pool, &config.key()?, &domain, &account.client_email, &json)
+                .await?;
+            println!(
+                "{domain} -> {} (key stored, encrypted)",
+                account.client_email
+            );
+            eprintln!(
+                "  The key is now in the database; the file at {path} is no longer needed                  by ingest and can be removed."
+            );
+            Ok(())
+        }
+
+        Some("remove-google") => {
+            let domain = arg(&args, 1, "domain")?;
+            let pool = connect_db(&config).await?;
+            db::remove_google_domain(&pool, &domain).await?;
+            println!("{domain} removed; its mailboxes can no longer be ingested");
+            Ok(())
+        }
+
+        Some("sources") => {
+            let pool = connect_db(&config).await?;
+            let accounts = db::all_sources(&pool).await?;
+            let domains = db::google_domains(&pool).await?;
+
+            if accounts.is_empty() && domains.is_empty() {
+                println!("no sources configured");
+                return Ok(());
+            }
+
+            if !domains.is_empty() {
+                println!("Google Workspace domains:");
+                for (domain, client_email) in &domains {
+                    println!("  {domain:28} {client_email}");
+                }
+            }
+
+            if !accounts.is_empty() {
+                println!("Accounts:");
+                for (address, label, provider, host, configured) in &accounts {
+                    let how = match (provider.as_str(), configured) {
+                        ("gmail", _) => "google (domain key)".to_string(),
+                        (_, true) => host.clone().unwrap_or_default(),
+                        // A generic IMAP account with no host or password is
+                        // registered but cannot be ingested yet.
+                        (_, false) => "NO CREDENTIALS -- set-source".to_string(),
+                    };
+                    println!("  {address:32} {label:12} {how}");
+                }
             }
             Ok(())
         }

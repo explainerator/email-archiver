@@ -236,10 +236,24 @@ pub async fn run(config: &Config, pool: &PgPool, address: &str) -> Result<()> {
     // accounts have no host or password recorded at all.
     let source = match account.provider.as_str() {
         "gmail" => {
-            let path = config.gmail.service_account_key.as_deref().context(
-                "this is a Google Workspace account, but gmail.service_account_key is not set                  in config.toml. See src/gmail.rs for the one-time setup.",
-            )?;
-            let tokens = crate::gmail::AccessTokens::new(crate::gmail::ServiceAccount::load(path)?);
+            // Keyed by domain: one service account is delegated for a whole
+            // Workspace domain, so every mailbox in it shares the credential.
+            let domain = address
+                .rsplit_once('@')
+                .map(|(_, d)| d)
+                .with_context(|| format!("{address:?} has no domain"))?;
+
+            let key = config.key()?;
+            let key_json = db::google_domain(pool, &key, domain)
+                .await?
+                .with_context(|| {
+                    format!(
+                        "no Google service account is configured for {domain}. Add one with: email set-google {domain} /path/to/service-account.json"
+                    )
+                })?;
+
+            let account = crate::gmail::ServiceAccount::parse(&key_json, domain)?;
+            let tokens = crate::gmail::AccessTokens::new(account);
             let token = tokens.for_user(address).await?;
             crate::config::Source {
                 host: "imap.gmail.com".to_string(),
