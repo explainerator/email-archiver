@@ -271,6 +271,21 @@ async fn admin_surface(pool: &sqlx::PgPool, user_id: i64, folder_id: i64) -> any
         "the hierarchy delimiter was not stored (an unscoped UPDATE affects zero rows silently)"
     );
 
+    // insecure-tls. A one-column UPDATE, and therefore able to fail the same
+    // silent way: matching zero rows and reporting success.
+    db::set_allow_invalid_certs(pool, TEST_ADDRESS, true).await?;
+    let listed = db::accounts_for_user(pool, user_id).await?;
+    anyhow::ensure!(
+        listed.iter().any(|a| a.0 == TEST_ADDRESS && a.5),
+        "insecure-tls did not take effect"
+    );
+    db::set_allow_invalid_certs(pool, TEST_ADDRESS, false).await?;
+    let listed = db::accounts_for_user(pool, user_id).await?;
+    anyhow::ensure!(
+        listed.iter().any(|a| a.0 == TEST_ADDRESS && !a.5),
+        "insecure-tls could not be turned back off"
+    );
+
     // The listings, which are how a person notices any of the above.
     let users = db::all_users(pool).await?;
     anyhow::ensure!(

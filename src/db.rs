@@ -211,6 +211,30 @@ pub async fn google_domains(pool: &PgPool) -> Result<Vec<(String, String)>> {
     Ok(rows)
 }
 
+/// Turn certificate verification on or off for one source mailbox.
+///
+/// Separate from `set_source` so a boolean can be changed without re-entering a
+/// password -- which would otherwise mean typing a credential to alter
+/// something unrelated to it, and typing credentials needlessly is how they end
+/// up somewhere they should not be.
+pub async fn set_allow_invalid_certs(pool: &PgPool, address: &str, allow: bool) -> Result<()> {
+    let owner = owner_of_address(pool, address).await?;
+    let mut scope = Scope::begin(pool, owner).await?;
+
+    let updated = sqlx::query("UPDATE accounts SET allow_invalid_certs = $2 WHERE address = $1")
+        .bind(address)
+        .bind(allow)
+        .execute(scope.conn())
+        .await?
+        .rows_affected();
+
+    // An UPDATE that matches nothing reports success, so this is checked rather
+    // than assumed -- the same silence that hid the hierarchy-delimiter bug.
+    anyhow::ensure!(updated == 1, "no account {address:?}");
+    scope.commit().await?;
+    Ok(())
+}
+
 /// Every archive user, for `users`.
 ///
 /// Reads `users` and `user_logins`, neither of which carries a policy --
@@ -272,11 +296,12 @@ pub struct UserSummary {
 pub async fn accounts_for_user(
     pool: &PgPool,
     user_id: i64,
-) -> Result<Vec<(String, String, String, Option<String>, bool)>> {
+) -> Result<Vec<(String, String, String, Option<String>, bool, bool)>> {
     let mut scope = Scope::begin(pool, user_id).await?;
     let rows = sqlx::query_as(
         "SELECT address, label, provider, imap_host,
-                (imap_host IS NOT NULL AND imap_password_enc IS NOT NULL)
+                (imap_host IS NOT NULL AND imap_password_enc IS NOT NULL),
+                allow_invalid_certs
            FROM accounts ORDER BY address",
     )
     .fetch_all(scope.conn())
@@ -292,7 +317,7 @@ pub async fn accounts_for_user(
 /// merely registered, not to hand back secrets.
 pub async fn all_sources(
     pool: &PgPool,
-) -> Result<Vec<(String, String, String, Option<String>, bool)>> {
+) -> Result<Vec<(String, String, String, Option<String>, bool, bool)>> {
     let users: Vec<i64> = sqlx::query_scalar("SELECT id FROM users ORDER BY id")
         .fetch_all(pool)
         .await?;
@@ -302,9 +327,10 @@ pub async fn all_sources(
     let mut all = Vec::new();
     for user_id in users {
         let mut scope = Scope::begin(pool, user_id).await?;
-        let rows: Vec<(String, String, String, Option<String>, bool)> = sqlx::query_as(
+        let rows: Vec<(String, String, String, Option<String>, bool, bool)> = sqlx::query_as(
             "SELECT address, label, provider, imap_host,
-                    (imap_host IS NOT NULL AND imap_password_enc IS NOT NULL)
+                    (imap_host IS NOT NULL AND imap_password_enc IS NOT NULL),
+                    allow_invalid_certs
                FROM accounts ORDER BY address",
         )
         .fetch_all(scope.conn())

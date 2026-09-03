@@ -56,6 +56,12 @@ USAGE:
         for the password. --insecure-tls accepts any certificate for THIS
         source only.
 
+    email-archiver insecure-tls <address> <on|off>
+        Accept any TLS certificate from this source's server, or stop doing so.
+        Changes only that setting -- no password needed. Encrypted but NOT
+        authenticated: use it only for a server whose certificate you cannot
+        fix and whose route you trust.
+
     email-archiver set-google <domain> <service-account.json>
         Store a Google Workspace service account key for a whole domain,
         encrypted. One key covers every mailbox in the domain, so Workspace
@@ -292,7 +298,7 @@ async fn main() -> Result<()> {
             }
 
             println!("{login} -> bucket {bucket}");
-            for (address, label, provider, host, configured) in &accounts {
+            for (address, label, provider, host, configured, insecure) in &accounts {
                 // The label is what prefixes this account's folders in the
                 // archive, so it is worth showing next to the address.
                 let how = match (provider.as_str(), configured) {
@@ -300,7 +306,38 @@ async fn main() -> Result<()> {
                     (_, true) => host.clone().unwrap_or_default(),
                     (_, false) => "NO CREDENTIALS — set-source".to_string(),
                 };
-                println!("  {address:32} {label:12} {how}");
+                // Surfaced because it is a security setting someone turned off
+                // deliberately, and a listing that hides it makes it easy to
+                // leave off long after the reason has gone.
+                let tls = if *insecure {
+                    "  [certs not verified]"
+                } else {
+                    ""
+                };
+                println!("  {address:32} {label:12} {how}{tls}");
+            }
+            Ok(())
+        }
+
+        Some("insecure-tls") => {
+            let address = arg(&args, 1, "address")?;
+            let state = arg(&args, 2, "on|off")?;
+            let allow = match state.as_str() {
+                "on" | "yes" | "true" => true,
+                "off" | "no" | "false" => false,
+                other => anyhow::bail!("expected on or off, got {other:?}"),
+            };
+            let pool = connect_db(&config).await?;
+            db::set_allow_invalid_certs(&pool, &address, allow).await?;
+
+            if allow {
+                println!("{address}: certificate verification DISABLED");
+                eprintln!("  The connection is still encrypted, but nothing proves you are");
+                eprintln!("  talking to the intended server. Anyone able to intercept the route");
+                eprintln!("  can present their own certificate, take the mailbox password, and");
+                eprintln!("  hand back whatever they like as your mail.");
+            } else {
+                println!("{address}: certificate verification enabled");
             }
             Ok(())
         }
@@ -350,7 +387,7 @@ async fn main() -> Result<()> {
 
             if !accounts.is_empty() {
                 println!("Accounts:");
-                for (address, label, provider, host, configured) in &accounts {
+                for (address, label, provider, host, configured, insecure) in &accounts {
                     let how = match (provider.as_str(), configured) {
                         ("gmail", _) => "google (domain key)".to_string(),
                         (_, true) => host.clone().unwrap_or_default(),
@@ -358,7 +395,12 @@ async fn main() -> Result<()> {
                         // registered but cannot be ingested yet.
                         (_, false) => "NO CREDENTIALS -- set-source".to_string(),
                     };
-                    println!("  {address:32} {label:12} {how}");
+                    let tls = if *insecure {
+                        "  [certs not verified]"
+                    } else {
+                        ""
+                    };
+                    println!("  {address:32} {label:12} {how}{tls}");
                 }
             }
             Ok(())

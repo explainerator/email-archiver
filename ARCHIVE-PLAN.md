@@ -567,6 +567,20 @@ conventional work.
 
 ---
 
+### 4.3 Reading the database by hand
+
+Every client connecting as `gern` is subject to the policies, including psql and DBeaver,
+so a fresh session sees empty tables. Declare an identity first:
+
+```sql
+SET archive.user_id = '1';        -- session-scoped; fine for a human tool
+SET archive.google_access = 'yes' -- only for google_domains
+```
+
+`SET` rather than `SET LOCAL` here deliberately: the application must use `SET LOCAL` so an
+identity cannot outlive its transaction on a pooled connection, but an interactive session
+owns its connection and wants the setting to persist.
+
 ### 8a.0 Source credentials live in the database, not the config
 
 Every credential ingest needs is in Postgres, encrypted with `encryption_key`:
