@@ -15,7 +15,10 @@
 
 use email_archiver::{config::Config, db};
 
-const TEST_LOGIN: &str = "rls-write-path-probe";
+// An address, not a name: logins are email addresses since migration 0010, and
+// create_user now rejects anything else. `.invalid` is reserved by RFC 2606 so
+// this can never collide with a real address.
+const TEST_LOGIN: &str = "write-path-probe@email-archiver.invalid";
 const TEST_BUCKET: &str = "rls-write-path-probe-bucket";
 const TEST_ADDRESS: &str = "probe@write-path.invalid";
 
@@ -42,8 +45,12 @@ async fn pool() -> Option<sqlx::PgPool> {
 /// failures on the tables that follow. `accounts` and `users` have no policy
 /// and are deleted afterwards, unscoped.
 async fn cleanup(pool: &sqlx::PgPool) {
-    let id: Option<i64> = sqlx::query_scalar("SELECT id FROM users WHERE login = $1")
-        .bind(TEST_LOGIN)
+    // Keyed on the BUCKET, not the login. The bucket is what carries the unique
+    // constraint that blocks a re-run, and it outlives login changes -- an
+    // earlier aborted run left a row behind under a login this test no longer
+    // uses, and cleanup keyed on login could not see it.
+    let id: Option<i64> = sqlx::query_scalar("SELECT id FROM users WHERE bucket = $1")
+        .bind(TEST_BUCKET)
         .fetch_optional(pool)
         .await
         .unwrap_or(None);
@@ -51,10 +58,15 @@ async fn cleanup(pool: &sqlx::PgPool) {
 
     match db::Scope::begin(pool, id).await {
         Ok(mut scope) => {
+            // accounts is in here too since migration 0009 gave it a policy --
+            // it holds decryptable source credentials. Leaving it outside the
+            // scope made its delete match nothing, and the users delete then
+            // failed on the foreign key.
             for sql in [
                 "DELETE FROM placements WHERE user_id = $1",
                 "DELETE FROM messages   WHERE user_id = $1",
                 "DELETE FROM folders    WHERE user_id = $1",
+                "DELETE FROM accounts   WHERE user_id = $1",
             ] {
                 if let Err(e) = sqlx::query(sql).bind(id).execute(scope.conn()).await {
                     eprintln!("cleanup failed on {sql}: {e}");
@@ -67,13 +79,14 @@ async fn cleanup(pool: &sqlx::PgPool) {
         Err(e) => eprintln!("cleanup could not open a scope: {e}"),
     }
 
-    for sql in [
-        "DELETE FROM accounts WHERE user_id = $1",
-        "DELETE FROM users    WHERE id = $1",
-    ] {
-        if let Err(e) = sqlx::query(sql).bind(id).execute(pool).await {
-            eprintln!("cleanup failed on {sql}: {e}");
-        }
+    // `users` is the only table left with no policy, so it is the only delete
+    // that can run unscoped.
+    if let Err(e) = sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(id)
+        .execute(pool)
+        .await
+    {
+        eprintln!("cleanup failed to delete the user: {e}");
     }
 }
 

@@ -16,10 +16,16 @@ USAGE:
         Show the current schema. Migrations run automatically on every
         command, so this is a report rather than a required step.
 
-    email-archiver add-user <login> <bucket> [display name]
-        Register an archive user and the S3 bucket they own.
+    email-archiver add-user <email> <bucket> [display name]
+        Register an archive user and the S3 bucket they own. The email address
+        IS the login -- one thing to remember instead of two, and already
+        unique without having to invent usernames.
 
-    email-archiver add-account <login> <address> <label> <imap|gmail>
+    email-archiver rename-user <old email> <new email>
+        Change a user's login. Password, bucket and archived mail are
+        unaffected; every foreign key uses the numeric id.
+
+    email-archiver add-account <email> <address> <label> <imap|gmail>
         Register a source mailbox feeding that user's archive. <label> becomes
         the IMAP namespace prefix, e.g. work -> work/INBOX.
 
@@ -27,7 +33,7 @@ USAGE:
         Print a fresh encryption key for config.toml. Changing this key makes
         every stored source password unreadable, so generate it once.
 
-    email-archiver set-password <login>
+    email-archiver set-password <email>
         Set an archive user's password (Argon2id), used by both IMAP and the web
         client. Prompts twice, without echoing. Until this is set the account
         cannot be logged into at all.
@@ -40,11 +46,11 @@ USAGE:
         Store source mailbox credentials, encrypted. Prompts for the password.
         --insecure-tls accepts any certificate for THIS source only.
 
-    email-archiver check <login> [--deep]
+    email-archiver check <email> [--deep]
         Verify Postgres and S3 agree for one user. Samples 5 blobs by default;
         --deep reads and hash-checks every message body.
 
-    email-archiver rebuild-manifests <login>
+    email-archiver rebuild-manifests <email>
         Regenerate all S3 manifests for a user from the database. Use when
         manifests are missing, or were written under an older key scheme.
 
@@ -63,7 +69,7 @@ USAGE:
         --allow-plaintext. --assets serves the built frontend; without it only
         the API responds.
 
-    email-archiver backfill-headers <login>
+    email-archiver backfill-headers <email>
         Cache header blocks for messages archived before that column existed.
         Purely an optimisation; safe to interrupt and resume.
 
@@ -111,6 +117,16 @@ async fn main() -> Result<()> {
             let pool = connect_db(&config).await?;
             let id = db::create_user(&pool, &login, &bucket, &display).await?;
             println!("user {login} (id {id}) -> bucket {bucket}");
+            Ok(())
+        }
+
+        Some("rename-user") => {
+            let old = arg(&args, 1, "old email")?;
+            let new = arg(&args, 2, "new email")?;
+            let pool = connect_db(&config).await?;
+            db::rename_user(&pool, &old, &new).await?;
+            println!("{old} is now {new}");
+            eprintln!("  Their password, bucket and archived mail are unchanged.");
             Ok(())
         }
 

@@ -83,6 +83,23 @@ and restarted anywhere that can reach both.
 
 Both Postgres and S3 are OVH Canada, so metadata lookups stay in-region.
 
+### 2.1a The login is the email address
+
+Users authenticate with their email address, not a username — one thing to remember
+instead of two, and already unique without inventing a namespace. `users.login` holds it;
+`email-archiver rename-user` changes it.
+
+There is no CHECK constraint enforcing the shape, and that is deliberate: migrations run
+inside `connect_db` on every command, so a constraint added by migration would be
+evaluated against existing rows before an operator could intervene — and on a database
+still holding a legacy name it would fail, take the migration down, and stop the archiver
+from starting at all, IMAP included. The rule is enforced in `db::looks_like_email`
+instead, at the moment someone tries to create a bad login and can fix it.
+
+Note that the login is an *identity*, not necessarily a mailbox we ingest.
+`ken@twoducks.ca` logs in; the source accounts feeding that archive are
+`kduck@twoducks.ca` and `info@kenduck.ca`.
+
 ### 2.2 One bucket per user
 
 **Each user gets their own bucket.** Not a shared bucket with per-user prefixes — a separate

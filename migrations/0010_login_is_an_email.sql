@@ -1,0 +1,34 @@
+-- ---------------------------------------------------------------------------
+-- The login IS the email address.
+--
+-- The first two users were `ken` and `jaqui`: a username to remember alongside
+-- the address, and a uniqueness problem to solve that email addresses had
+-- already solved. Renamed to `ken@twoducks.ca` and `art@jduck.ca` with
+-- `email-archiver rename-user`.
+--
+-- No schema change is needed -- `login` was already `text NOT NULL UNIQUE` --
+-- so this migration only records the intent where the next reader will find it.
+--
+-- WHY THERE IS NO CHECK CONSTRAINT.
+--
+-- A constraint would be the obvious way to stop a bare name coming back, and it
+-- is deliberately absent. Migrations run inside `connect_db`, on every command,
+-- before an operator can intervene. A CHECK added here would have been
+-- evaluated against whatever logins already existed -- and on any database
+-- still holding `ken`, it would have failed, taken the migration down with it,
+-- and stopped the archiver from starting at all. Including the IMAP server, for
+-- a cosmetic constraint on a column nothing joins against.
+--
+-- So the rule is enforced where it can fail safely: `db::looks_like_email`,
+-- called by both `create_user` and `rename_user`. A bad login is rejected at
+-- the point someone tries to create one, which is the moment they can fix it.
+--
+-- The check itself is deliberately loose. Validating email properly means RFC
+-- 5322, which permits quoted strings, comments and address literals; rejecting
+-- somebody's real address because our pattern disagreed would be a worse
+-- failure than accepting a typo. It catches the mistake it exists for -- a bare
+-- name where an address belongs -- and nothing more.
+-- ---------------------------------------------------------------------------
+
+COMMENT ON COLUMN users.login IS
+    'The user''s email address, which IS their login for both IMAP and the web client. Not validated by a constraint -- see migration 0010 -- but checked by db::looks_like_email on create and rename.';

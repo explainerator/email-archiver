@@ -86,11 +86,16 @@ fn Login(auth: Signal<Auth>) -> Element {
         div { class: "centre",
             form { class: "card", onsubmit: submit,
                 h1 { "Mail archive" }
-                label { r#for: "login", "Account" }
+                label { r#for: "login", "Email address" }
                 input {
                     id: "login",
-                    r#type: "text",
-                    autocomplete: "username",
+                    // type=email so phones offer the right keyboard, and
+                    // autocomplete=email so password managers fill it. The
+                    // login IS the address; there is no separate username.
+                    r#type: "email",
+                    autocomplete: "email",
+                    autocapitalize: "none",
+                    spellcheck: "false",
                     autofocus: true,
                     value: "{login}",
                     oninput: move |e| login.set(e.value()),

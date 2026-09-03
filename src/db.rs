@@ -105,7 +105,55 @@ impl<'c> Scope<'c> {
     }
 }
 
+/// Is this login shaped like an email address?
+///
+/// Deliberately loose. Validating email properly means RFC 5322, which accepts
+/// quoted strings, comments and address literals, and rejecting a real address
+/// because our regex disagreed would be worse than accepting a typo. This only
+/// catches the mistake it exists to catch: a bare name like `ken` where an
+/// address belongs.
+pub fn looks_like_email(login: &str) -> bool {
+    let mut parts = login.split('@');
+    let (Some(local), Some(domain), None) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    !local.is_empty()
+        && domain.contains('.')
+        && !domain.starts_with('.')
+        && !domain.ends_with('.')
+        && !login.chars().any(char::is_whitespace)
+}
+
+/// Change a user's login.
+///
+/// Exists because the login is an email address now and the first two users
+/// predate that decision. Nothing else references `users.login` -- every
+/// foreign key uses `users.id` -- so this is genuinely just a rename, and read
+/// state, buckets and archived mail are untouched.
+pub async fn rename_user(pool: &PgPool, old: &str, new: &str) -> Result<()> {
+    anyhow::ensure!(
+        looks_like_email(new),
+        "{new:?} is not an email address. The login IS the email address now."
+    );
+
+    let affected = sqlx::query("UPDATE users SET login = $2 WHERE login = $1")
+        .bind(old)
+        .bind(new)
+        .execute(pool)
+        .await
+        .with_context(|| format!("renaming {old:?} to {new:?} (is {new:?} already taken?)"))?
+        .rows_affected();
+
+    anyhow::ensure!(affected == 1, "no user with login {old:?}");
+    Ok(())
+}
+
 pub async fn create_user(pool: &PgPool, login: &str, bucket: &str, display: &str) -> Result<i64> {
+    anyhow::ensure!(
+        looks_like_email(login),
+        "login {login:?} is not an email address. Logins are email addresses:          one thing to remember instead of two, and already unique."
+    );
+
     // password_hash is a placeholder until IMAP auth lands in Phase 4. It is
     // deliberately not a valid hash, so nothing can authenticate as this user
     // by accident before the real credential is set.
@@ -943,4 +991,51 @@ pub async fn set_headers(scope: &mut Scope<'_>, blake3: &str, headers: &[u8]) ->
         .execute(scope.conn())
         .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod login_tests {
+    use super::looks_like_email;
+
+    #[test]
+    fn accepts_real_addresses() {
+        for good in [
+            "ken@twoducks.ca",
+            "art@jduck.ca",
+            "first-last@example.co.uk",
+            "a.b+tag@sub.example.com",
+            "info@kenduck.ca",
+        ] {
+            assert!(looks_like_email(good), "rejected {good}");
+        }
+    }
+
+    #[test]
+    fn rejects_the_mistake_it_exists_for() {
+        // A bare name where an address belongs -- what the first two users had.
+        for bad in [
+            "ken",
+            "jaqui",
+            "",
+            "@",
+            "ken@",
+            "@twoducks.ca",
+            "ken@localhost",
+        ] {
+            assert!(!looks_like_email(bad), "accepted {bad}");
+        }
+    }
+
+    #[test]
+    fn rejects_things_that_would_break_a_login_field() {
+        for bad in [
+            "two@at@signs.com",
+            "ken @twoducks.ca",
+            "ken@two ducks.ca",
+            "ken@.ca",
+            "ken@ca.",
+        ] {
+            assert!(!looks_like_email(bad), "accepted {bad}");
+        }
+    }
 }
