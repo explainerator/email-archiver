@@ -124,6 +124,89 @@ pub fn looks_like_email(login: &str) -> bool {
         && !login.chars().any(char::is_whitespace)
 }
 
+/// The user a login belongs to, and their bucket.
+///
+/// The single place a login becomes a user. Every command that names an
+/// address goes through here, so an alias works everywhere the primary does
+/// rather than only at the login prompt -- which was the point of adding them.
+pub async fn user_by_login(pool: &PgPool, login: &str) -> Result<Option<(i64, String)>> {
+    let row: Option<(i64, String)> = sqlx::query_as(
+        "SELECT u.id, u.bucket
+           FROM user_logins l
+           JOIN users u ON u.id = l.user_id
+          WHERE l.login = $1",
+    )
+    .bind(login)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row)
+}
+
+/// Add another address the user may log in with.
+pub async fn add_alias(pool: &PgPool, existing: &str, alias: &str) -> Result<i64> {
+    anyhow::ensure!(
+        looks_like_email(alias),
+        "{alias:?} is not an email address. Logins are addresses."
+    );
+
+    let (user_id, _) = user_by_login(pool, existing)
+        .await?
+        .with_context(|| format!("no user with login {existing:?}"))?;
+
+    // The primary key does the work: if this address is already anyone's login,
+    // including this user's, the insert fails rather than silently moving it.
+    sqlx::query("INSERT INTO user_logins (login, user_id, is_primary) VALUES ($1, $2, false)")
+        .bind(alias)
+        .bind(user_id)
+        .execute(pool)
+        .await
+        .with_context(|| format!("{alias:?} is already a login, possibly for another user"))?;
+
+    Ok(user_id)
+}
+
+/// Remove an alias. Refuses to remove a user's last or canonical address.
+pub async fn remove_alias(pool: &PgPool, alias: &str) -> Result<()> {
+    let row: Option<(i64, bool)> =
+        sqlx::query_as("SELECT user_id, is_primary FROM user_logins WHERE login = $1")
+            .bind(alias)
+            .fetch_optional(pool)
+            .await?;
+
+    let (user_id, is_primary) = row.with_context(|| format!("{alias:?} is not a login"))?;
+
+    // Removing the canonical address would leave the user with no name to
+    // display and no obvious address to rename later. `rename-user` is the way
+    // to change it.
+    anyhow::ensure!(
+        !is_primary,
+        "{alias:?} is this user's primary address, not an alias. \
+         Use `rename-user` to change it, or remove a different alias."
+    );
+
+    sqlx::query("DELETE FROM user_logins WHERE login = $1")
+        .bind(alias)
+        .execute(pool)
+        .await?;
+
+    let _ = user_id;
+    Ok(())
+}
+
+/// Every login a user has, primary first.
+pub async fn logins_for(pool: &PgPool, user_id: i64) -> Result<Vec<(String, bool)>> {
+    let rows: Vec<(String, bool)> = sqlx::query_as(
+        "SELECT login, is_primary FROM user_logins
+          WHERE user_id = $1 ORDER BY is_primary DESC, login",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows)
+}
+
 /// Change a user's login.
 ///
 /// Exists because the login is an email address now and the first two users
@@ -136,7 +219,9 @@ pub async fn rename_user(pool: &PgPool, old: &str, new: &str) -> Result<()> {
         "{new:?} is not an email address. The login IS the email address now."
     );
 
-    let affected = sqlx::query("UPDATE users SET login = $2 WHERE login = $1")
+    // Renames the row itself rather than the primary flag, so aliases are
+    // untouched: renaming the canonical address does not disturb the others.
+    let affected = sqlx::query("UPDATE user_logins SET login = $2 WHERE login = $1")
         .bind(old)
         .bind(new)
         .execute(pool)
@@ -151,24 +236,41 @@ pub async fn rename_user(pool: &PgPool, old: &str, new: &str) -> Result<()> {
 pub async fn create_user(pool: &PgPool, login: &str, bucket: &str, display: &str) -> Result<i64> {
     anyhow::ensure!(
         looks_like_email(login),
-        "login {login:?} is not an email address. Logins are email addresses:          one thing to remember instead of two, and already unique."
+        "login {login:?} is not an email address. Logins are email addresses: one \n         thing to remember instead of two, and already unique."
     );
 
     // password_hash is a placeholder until IMAP auth lands in Phase 4. It is
     // deliberately not a valid hash, so nothing can authenticate as this user
     // by accident before the real credential is set.
+    // The user row and its primary login go in together: a user with no login
+    // could not be addressed by any command, and a login with no user is
+    // rejected by the foreign key.
+    let mut tx = pool.begin().await?;
+
     let id: i64 = sqlx::query_scalar(
-        "INSERT INTO users (login, password_hash, bucket, display_name)
-         VALUES ($1, '!', $2, $3)
-         ON CONFLICT (login) DO UPDATE SET bucket = EXCLUDED.bucket
+        "INSERT INTO users (password_hash, bucket, display_name)
+         VALUES ('!', $1, $2)
+         ON CONFLICT (bucket) DO UPDATE SET display_name = EXCLUDED.display_name
          RETURNING id",
     )
-    .bind(login)
     .bind(bucket)
     .bind(display)
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await
     .with_context(|| format!("creating user {login}"))?;
+
+    sqlx::query(
+        "INSERT INTO user_logins (login, user_id, is_primary)
+         VALUES ($1, $2, true)
+         ON CONFLICT (login) DO NOTHING",
+    )
+    .bind(login)
+    .bind(id)
+    .execute(&mut *tx)
+    .await
+    .with_context(|| format!("{login:?} is already a login, possibly for another user"))?;
+
+    tx.commit().await?;
     Ok(id)
 }
 
@@ -179,9 +281,7 @@ pub async fn create_account(
     label: &str,
     provider: &str,
 ) -> Result<i64> {
-    let user_id: i64 = sqlx::query_scalar("SELECT id FROM users WHERE login = $1")
-        .bind(login)
-        .fetch_optional(pool)
+    let (user_id, _) = user_by_login(pool, login)
         .await?
         .with_context(|| format!("no such user {login:?} — create it first"))?;
 
@@ -641,11 +741,15 @@ pub async fn authenticate(
     login: &str,
     password: &str,
 ) -> Result<Option<(i64, String)>> {
-    let row: Option<(i64, String, String)> =
-        sqlx::query_as("SELECT id, bucket, password_hash FROM users WHERE login = $1")
-            .bind(login)
-            .fetch_optional(pool)
-            .await?;
+    let row: Option<(i64, String, String)> = sqlx::query_as(
+        "SELECT u.id, u.bucket, u.password_hash
+               FROM user_logins l
+               JOIN users u ON u.id = l.user_id
+              WHERE l.login = $1",
+    )
+    .bind(login)
+    .fetch_optional(pool)
+    .await?;
 
     Ok(match row {
         Some((id, bucket, hash)) if crate::secrets::verify_password(password, &hash) => {
@@ -955,11 +1059,15 @@ pub struct SearchRow {
 /// session and is asking "who is this", not "is this password right".
 pub async fn user_by_id(scope: &mut Scope<'_>) -> Result<Option<(String, String)>> {
     let user_id = scope.user_id();
-    let row: Option<(String, Option<String>)> =
-        sqlx::query_as("SELECT login, display_name FROM users WHERE id = $1")
-            .bind(user_id)
-            .fetch_optional(scope.conn())
-            .await?;
+    let row: Option<(String, Option<String>)> = sqlx::query_as(
+        "SELECT l.login, u.display_name
+               FROM users u
+               JOIN user_logins l ON l.user_id = u.id AND l.is_primary
+              WHERE u.id = $1",
+    )
+    .bind(user_id)
+    .fetch_optional(scope.conn())
+    .await?;
 
     // display_name is nullable; falling back to the login keeps the API's shape
     // stable so the client never has to handle a missing name.

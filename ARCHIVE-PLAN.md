@@ -96,9 +96,23 @@ still holding a legacy name it would fail, take the migration down, and stop the
 from starting at all, IMAP included. The rule is enforced in `db::looks_like_email`
 instead, at the moment someone tries to create a bad login and can fix it.
 
-Note that the login is an *identity*, not necessarily a mailbox we ingest.
-`ken@twoducks.ca` logs in; the source accounts feeding that archive are
-`kduck@twoducks.ca` and `info@kenduck.ca`.
+A user may have **several** addresses (`user_logins`, migration 0011), and an alias works
+everywhere the primary does — IMAP, the web client, and every CLI command that names a
+user. That is the point: a login that worked in one place and not another would be exactly
+the thing you had to remember.
+
+Every login lives in one table, so the primary key *is* the uniqueness rule — an alias
+cannot collide with another user's login, because they are rows in the same index. Keeping
+`users.login` and adding a separate alias table would have been a smaller migration and
+would have split logins across two uniqueness domains, making "is this alias taken?" a
+SELECT-then-INSERT race in application code.
+
+Note that a login is an *identity*, not necessarily a mailbox we ingest. `ken@twoducks.ca`
+and `kduck@twoducks.ca` both log in; the source accounts feeding that archive are
+`kduck@twoducks.ca` and `info@kenduck.ca`. The overlap is a coincidence, not a rule — and
+resisting the temptation to *derive* logins from `accounts` is deliberate: the moment a
+shared, role or former-employee mailbox is archived, its address would silently become a
+working login.
 
 ### 2.2 One bucket per user
 

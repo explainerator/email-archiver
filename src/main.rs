@@ -22,8 +22,17 @@ USAGE:
         unique without having to invent usernames.
 
     email-archiver rename-user <old email> <new email>
-        Change a user's login. Password, bucket and archived mail are
-        unaffected; every foreign key uses the numeric id.
+        Change a user's primary address. Aliases, password, bucket and archived
+        mail are unaffected; every foreign key uses the numeric id.
+
+    email-archiver alias <existing email> <new alias>
+        Add another address the user may log in with. Works everywhere the
+        primary does -- IMAP, the web client, and every command below that
+        names a user.
+
+    email-archiver remove-alias <alias>
+        Remove an alias. Refuses to remove a user's primary address; use
+        rename-user for that.
 
     email-archiver add-account <email> <address> <label> <imap|gmail>
         Register a source mailbox feeding that user's archive. <label> becomes
@@ -106,6 +115,18 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Usage is answered BEFORE the config is read. Printing help should not
+    // require a working configuration -- and gern-shell reads this output to
+    // build its own help for the `email` verb, on machines and at moments where
+    // no config need exist.
+    match args.first().map(String::as_str) {
+        None | Some("help") | Some("-h") | Some("--help") => {
+            print!("{USAGE}");
+            return Ok(());
+        }
+        _ => {}
+    }
+
     let config = Config::load()?;
 
     match args.first().map(String::as_str) {
@@ -127,6 +148,26 @@ async fn main() -> Result<()> {
             db::rename_user(&pool, &old, &new).await?;
             println!("{old} is now {new}");
             eprintln!("  Their password, bucket and archived mail are unchanged.");
+            Ok(())
+        }
+
+        Some("alias") => {
+            let existing = arg(&args, 1, "existing email")?;
+            let alias = arg(&args, 2, "new alias")?;
+            let pool = connect_db(&config).await?;
+            let user_id = db::add_alias(&pool, &existing, &alias).await?;
+            println!("{alias} is now an alias for {existing}");
+            for (login, primary) in db::logins_for(&pool, user_id).await? {
+                println!("  {login}{}", if primary { "  (primary)" } else { "" });
+            }
+            Ok(())
+        }
+
+        Some("remove-alias") => {
+            let alias = arg(&args, 1, "alias")?;
+            let pool = connect_db(&config).await?;
+            db::remove_alias(&pool, &alias).await?;
+            println!("{alias} is no longer a login");
             Ok(())
         }
 

@@ -17,9 +17,9 @@ use crate::store::{Manifest, Store};
 
 pub async fn run(config: &Config, pool: &PgPool, login: &str, deep: bool) -> Result<()> {
     let (user_id, bucket): (i64, String) =
-        sqlx::query_as("SELECT id, bucket FROM users WHERE login = $1")
-            .bind(login)
-            .fetch_optional(pool)
+        // Through user_logins, so an alias works here as well as at the login
+        // prompt -- the point of having aliases at all.
+        db::user_by_login(pool, login)
             .await?
             .ok_or_else(|| anyhow::anyhow!("no such user {login:?}"))?;
 
@@ -146,9 +146,9 @@ pub async fn run(config: &Config, pool: &PgPool, login: &str, deep: bool) -> Res
 /// to a rebuild that lists versions.
 pub async fn rebuild_manifests(config: &Config, pool: &PgPool, login: &str) -> Result<()> {
     let (user_id, bucket): (i64, String) =
-        sqlx::query_as("SELECT id, bucket FROM users WHERE login = $1")
-            .bind(login)
-            .fetch_optional(pool)
+        // Through user_logins, so an alias works here as well as at the login
+        // prompt -- the point of having aliases at all.
+        db::user_by_login(pool, login)
             .await?
             .ok_or_else(|| anyhow::anyhow!("no such user {login:?}"))?;
 
@@ -193,9 +193,9 @@ pub async fn rebuild_manifests(config: &Config, pool: &PgPool, login: &str) -> R
 /// with a round trip — so this can be interrupted and resumed freely.
 pub async fn backfill_headers(config: &Config, pool: &PgPool, login: &str) -> Result<()> {
     let (user_id, bucket): (i64, String) =
-        sqlx::query_as("SELECT id, bucket FROM users WHERE login = $1")
-            .bind(login)
-            .fetch_optional(pool)
+        // Through user_logins, so an alias works here as well as at the login
+        // prompt -- the point of having aliases at all.
+        db::user_by_login(pool, login)
             .await?
             .ok_or_else(|| anyhow::anyhow!("no such user {login:?}"))?;
 
