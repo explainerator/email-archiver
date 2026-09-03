@@ -1,6 +1,6 @@
 # Row-Level Security for the archive
 
-Status: **design, not started.** Companion to `ARCHIVE-PLAN.md` and `WEBAPP-PLAN.md`.
+Status: **phase 1 done**, phases 2-5 outstanding. Companion to `ARCHIVE-PLAN.md` and `WEBAPP-PLAN.md`.
 
 ---
 
@@ -190,7 +190,7 @@ Each phase is independently deployable and leaves the system working.
 
 | Phase | Work | Gate |
 |---|---|---|
-| **1** | Migration: `user_id` on `folders` and `placements`, backfilled, with the composite FK of §3. **No RLS yet.** | Existing tests pass; counts unchanged; a deliberate mismatched insert is rejected |
+| **1** | ✅ Migration: `user_id` on `folders` and `placements`, backfilled, with the composite FK of §3. **No RLS yet.** | Done — 152,741 placements and 46 folders backfilled, zero nulls, zero mismatches; a deliberate wrong-owner update is rejected by the FK |
 | **2** | `db::scoped()` helper: transaction + `SET LOCAL`. Route every read through it. Still no RLS, so behaviour is unchanged and any mistake is visible as a normal bug | All existing queries still return what they did; integration tests green |
 | **3** | Enable RLS + FORCE + policy on **`accounts` only** — the smallest table, and the one whose breakage is most obvious | Login, folder list and ingest all still work |
 | **4** | The same on `folders`, `messages`, `placements` | Full app exercised: browse, read, search, download, ingest |

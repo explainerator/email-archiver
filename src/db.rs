@@ -154,8 +154,11 @@ pub async fn folder_for_ingest(
     // Our UIDVALIDITY is generated once, at creation, and never changes.
     let uidvalidity = Utc::now().timestamp();
     let id: i64 = sqlx::query_scalar(
-        "INSERT INTO folders (account_id, name, uidvalidity, uidnext, source_uidvalidity, last_source_uid)
-         VALUES ($1, $2, $3, 1, $4, 0)
+        // user_id is SELECTed from the account rather than passed in. A caller
+        // cannot supply the wrong one because a caller does not supply it at
+        // all -- the value comes from the row it must agree with.
+        "INSERT INTO folders (account_id, name, uidvalidity, uidnext, source_uidvalidity, last_source_uid, user_id)
+         SELECT $1, $2, $3, 1, $4, 0, a.user_id FROM accounts a WHERE a.id = $1
          RETURNING id",
     )
     .bind(account_id)
@@ -260,9 +263,12 @@ pub async fn place_message(
     .fetch_one(&mut *tx)
     .await?;
 
-    sqlx::query(
-        "INSERT INTO placements (folder_id, uid, message_id, source_uid, seen)
-         VALUES ($1, $2, $3, $4, $5)",
+    let inserted = sqlx::query(
+        // Likewise derived, this time from the folder. The composite foreign
+        // key would reject a mismatch anyway; taking the value from the same
+        // row means it never has the chance to be wrong.
+        "INSERT INTO placements (folder_id, uid, message_id, source_uid, seen, user_id)
+         SELECT $1, $2, $3, $4, $5, f.user_id FROM folders f WHERE f.id = $1",
     )
     .bind(folder_id)
     .bind(uid)
@@ -271,6 +277,17 @@ pub async fn place_message(
     .bind(seen)
     .execute(&mut *tx)
     .await?;
+
+    // INSERT ... SELECT inserts NOTHING when the SELECT matches nothing, where
+    // the previous VALUES form would have raised a foreign-key violation. That
+    // silence is the whole danger of the rewrite: this function would report a
+    // UID it had handed out for a placement that was never stored, and ingest
+    // would record the message as archived. Checked rather than assumed.
+    anyhow::ensure!(
+        inserted.rows_affected() == 1,
+        "placement for folder {folder_id} inserted {} rows; the folder disappeared mid-transaction",
+        inserted.rows_affected()
+    );
 
     tx.commit().await?;
     Ok((uid, true))
