@@ -65,6 +65,7 @@ pub async fn run(config: &crate::config::Config, pool: &sqlx::PgPool, address: &
             println!("C: a1 LOGIN {} <password>", source.username);
             let line = format!("a1 LOGIN {} {}\r\n", source.username, password);
             stream.get_mut().write_all(line.as_bytes()).await?;
+            stream.get_mut().flush().await?;
         }
         Auth::XOAuth2 { token } => {
             println!("C: a1 AUTHENTICATE XOAUTH2");
@@ -72,6 +73,7 @@ pub async fn run(config: &crate::config::Config, pool: &sqlx::PgPool, address: &
                 .get_mut()
                 .write_all(b"a1 AUTHENTICATE XOAUTH2\r\n")
                 .await?;
+            stream.get_mut().flush().await?;
 
             // The server must now send a continuation. If this is where ingest
             // stalls, the deadline below is what proves it.
@@ -87,8 +89,17 @@ pub async fn run(config: &crate::config::Config, pool: &sqlx::PgPool, address: &
             let credential = format!("user={}\x01auth=Bearer {}\x01\x01", source.username, token);
             let encoded = base64::engine::general_purpose::STANDARD.encode(credential);
             println!("C: <credential, {} chars base64>", encoded.len());
-            stream.get_mut().write_all(encoded.as_bytes()).await?;
-            stream.get_mut().write_all(b"\r\n").await?;
+
+            // One write, then an explicit flush. tokio-rustls buffers into
+            // the TLS session and only pushes to the socket when the state
+            // machine is driven, so an unflushed line can sit here while the
+            // server waits for input that was never sent -- which looks
+            // exactly like the server going quiet.
+            let mut line = encoded.into_bytes();
+            line.extend_from_slice(b"\r\n");
+            stream.get_mut().write_all(&line).await?;
+            stream.get_mut().flush().await?;
+            stream.get_mut().flush().await?;
         }
     }
 
@@ -106,6 +117,7 @@ pub async fn run(config: &crate::config::Config, pool: &sqlx::PgPool, address: &
             // for the original hang.
             println!("C: <empty line to end the exchange>");
             stream.get_mut().write_all(b"\r\n").await?;
+            stream.get_mut().flush().await?;
             continue;
         }
         if line.starts_with("a1 OK") {
@@ -126,6 +138,7 @@ pub async fn run(config: &crate::config::Config, pool: &sqlx::PgPool, address: &
         .get_mut()
         .write_all(b"a2 LIST \"\" \"*\"\r\n")
         .await?;
+    stream.get_mut().flush().await?;
 
     let mut folders = 0;
     for _ in 0..500 {
