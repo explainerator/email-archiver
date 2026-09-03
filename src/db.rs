@@ -133,7 +133,13 @@ pub async fn create_account(
         .await?
         .with_context(|| format!("no such user {login:?} — create it first"))?;
 
+    // The INSERT below is into a policy-covered table, so WITH CHECK requires a
+    // declared identity that matches the row's owner -- the user just found.
+    let mut scope = Scope::begin(pool, user_id).await?;
+
     let id: i64 = sqlx::query_scalar(
+        // In a scope: the policy's WITH CHECK requires the new row's owner to
+        // match the declared identity, which is the same user just looked up.
         "INSERT INTO accounts (user_id, address, label, provider)
          VALUES ($1, $2, $3, $4)
          ON CONFLICT (address) DO UPDATE SET label = EXCLUDED.label
@@ -143,20 +149,52 @@ pub async fn create_account(
     .bind(address)
     .bind(label)
     .bind(provider)
-    .fetch_one(pool)
+    .fetch_one(scope.conn())
     .await
     .with_context(|| format!("creating account {address}"))?;
+
+    scope.commit().await?;
     Ok(id)
 }
 
-pub async fn account_by_address(pool: &PgPool, address: &str) -> Result<Account> {
+/// Which user owns an address, resolved without an identity.
+///
+/// The bootstrap for every CLI command that names an address:
+/// `ingest`, `set-source`, `diagnose`. `accounts` is policy-covered, so it
+/// cannot simply be read -- but `users` is not, because authentication has to
+/// search it before anyone is logged in. So this walks the users and asks each
+/// scope whether the address is theirs.
+///
+/// O(users) round trips, on a table with a handful of rows, once per CLI
+/// invocation. That is a small price for not leaving encrypted source-mailbox
+/// credentials readable by any unscoped query.
+pub async fn owner_of_address(pool: &PgPool, address: &str) -> Result<i64> {
+    let users: Vec<i64> = sqlx::query_scalar("SELECT id FROM users ORDER BY id")
+        .fetch_all(pool)
+        .await?;
+
+    for user_id in users {
+        let mut scope = Scope::begin(pool, user_id).await?;
+        let found: Option<i64> = sqlx::query_scalar("SELECT id FROM accounts WHERE address = $1")
+            .bind(address)
+            .fetch_optional(scope.conn())
+            .await?;
+        if found.is_some() {
+            return Ok(user_id);
+        }
+    }
+
+    anyhow::bail!("no account for address {address:?}")
+}
+
+pub async fn account_by_address(scope: &mut Scope<'_>, address: &str) -> Result<Account> {
     let row: (i64, i64, String, String, String) = sqlx::query_as(
         "SELECT a.id, a.user_id, a.address, a.label, u.bucket
          FROM accounts a JOIN users u ON u.id = a.user_id
          WHERE a.address = $1",
     )
     .bind(address)
-    .fetch_optional(pool)
+    .fetch_optional(scope.conn())
     .await?
     .with_context(|| format!("no account {address:?} in the database — add it first"))?;
 
@@ -500,6 +538,12 @@ pub async fn set_source(
     password: &str,
     allow_invalid_certs: bool,
 ) -> Result<()> {
+    // Writing credentials into a policy-covered table: the identity must be
+    // declared, and it must be the address's real owner or WITH CHECK rejects
+    // the update.
+    let owner = owner_of_address(pool, address).await?;
+    let mut scope = Scope::begin(pool, owner).await?;
+
     let encrypted = key.encrypt(password)?;
     let updated = sqlx::query(
         "UPDATE accounts
@@ -513,12 +557,13 @@ pub async fn set_source(
     .bind(username)
     .bind(&encrypted)
     .bind(allow_invalid_certs)
-    .execute(pool)
+    .execute(scope.conn())
     .await?;
     anyhow::ensure!(
         updated.rows_affected() == 1,
         "no account {address:?} — add it first with: email-archiver add-account"
     );
+    scope.commit().await?;
     Ok(())
 }
 

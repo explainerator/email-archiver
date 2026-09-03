@@ -27,7 +27,16 @@ async fn pool() -> Option<sqlx::PgPool> {
         .ok()
 }
 
-const PROTECTED: [&str; 3] = ["messages", "folders", "placements"];
+/// Every table that must never be readable without a declared identity.
+///
+/// `accounts` is here because it holds `imap_password_enc` and the application
+/// holds the key: reading another user's row recovers their live source mailbox
+/// password, not merely metadata. It was excluded from the first cut of this
+/// work on the grounds that it held "no mail", which weighed the wrong thing.
+///
+/// `users` is deliberately absent and cannot be added — `authenticate` must
+/// find a row before there is anyone to be.
+const PROTECTED: [&str; 4] = ["messages", "folders", "placements", "accounts"];
 
 #[tokio::test]
 async fn the_policy_is_actually_on() {
@@ -174,4 +183,69 @@ async fn a_query_missing_its_where_clause_still_sees_nothing() {
         seen_a, seen_b,
         "a WHERE-less query returned the same rows to both users"
     );
+}
+
+#[tokio::test]
+async fn source_credentials_are_unreadable_without_an_identity() {
+    // The sharpest case. `accounts.imap_password_enc` is encrypted with a key
+    // the application already holds, so an unscoped read of another user's row
+    // is not a metadata leak -- it hands over the password to their real mail
+    // server.
+    let Some(pool) = pool().await else { return };
+
+    let visible: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM accounts WHERE imap_password_enc IS NOT NULL")
+            .fetch_one(&pool)
+            .await
+            .expect("unscoped accounts read");
+    assert_eq!(visible, 0, "source credentials readable with no identity");
+}
+
+#[tokio::test]
+async fn the_address_bootstrap_still_works() {
+    // Closing `accounts` broke `ingest <address>`, which must find an address's
+    // owner before it can declare one. owner_of_address walks `users` instead.
+    // If this regresses, every CLI command that names an address stops working.
+    let Some(pool) = pool().await else { return };
+
+    let address: Option<String> = sqlx::query_scalar("SELECT address FROM accounts LIMIT 1")
+        .fetch_optional(&pool)
+        .await
+        .unwrap()
+        .flatten();
+    // Unscoped, so this is None under the policy: take one the long way round.
+    let address = match address {
+        Some(a) => a,
+        None => {
+            let users: Vec<(i64,)> = sqlx::query_as("SELECT id FROM users ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+            let mut found = None;
+            for (id,) in users {
+                let mut scope = db::Scope::begin(&pool, id).await.unwrap();
+                found = sqlx::query_scalar("SELECT address FROM accounts LIMIT 1")
+                    .fetch_optional(scope.conn())
+                    .await
+                    .unwrap()
+                    .flatten();
+                drop(scope);
+                if found.is_some() {
+                    break;
+                }
+            }
+            match found {
+                Some(a) => a,
+                None => {
+                    eprintln!("skipping: no accounts");
+                    return;
+                }
+            }
+        }
+    };
+
+    let owner = db::owner_of_address(&pool, &address)
+        .await
+        .expect("owner_of_address must resolve a real address");
+    assert!(owner > 0);
 }

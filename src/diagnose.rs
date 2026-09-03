@@ -21,10 +21,14 @@ use crate::db;
 use crate::ingest;
 
 pub async fn run(config: &Config, pool: &PgPool, address: &str, folder: &str) -> Result<()> {
-    let account = db::account_by_address(pool, address).await?;
+    // accounts is policy-covered, so the owner has to be resolved first --
+    // through `users`, which is not. See db::owner_of_address.
+    let owner = db::owner_of_address(pool, address).await?;
+    let account = {
+        let mut scope = db::Scope::begin(pool, owner).await?;
+        db::account_by_address(&mut scope, address).await?
+    };
 
-    // accounts carries no policy (RLS-PLAN section 4), which is what lets the
-    // lookup above resolve an address to its owner before an identity exists.
     // Everything after this reads the policy-covered tables.
     let mut scope = db::Scope::begin(pool, account.user_id).await?;
     let key = config.key()?;

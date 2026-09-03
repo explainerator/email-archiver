@@ -123,30 +123,28 @@ database. The denormalised column cannot drift.
 
 ## 4. Which tables get RLS
 
-**`folders`, `messages`, `placements`.** These three hold mail and its structure, and all
-three now carry `user_id` directly (§3), so each policy is one column comparison.
+**`accounts`, `folders`, `messages`, `placements`** — everything except `users`.
 
-**`users` deliberately does not.** Authentication has to find a row *before* an identity
-exists — `db::authenticate` searches by login, with no user to scope to. A policy there
-would have to be permissive enough to allow that, which would make it decorative. The table
-holds password hashes and bucket names, no mail, and the hashes are Argon2id.
+**`users` cannot be protected**, and that is a property of authentication rather than an
+oversight: `db::authenticate` has to find a row by login *before* there is anyone to be. It
+holds logins, Argon2id hashes and bucket names.
 
-**`accounts` deliberately does not either — changed from the original draft.** The same
-bootstrap problem, found while converting the CLI: `email-archiver ingest <address>` starts
-from an address and has to discover *which user owns it* before it can declare an identity.
-A policy on `accounts` makes that lookup return nothing, and the only ways round it are
-worse than the protection is worth — a policy that permits reads when no identity is set
-would mean a forgotten scope reads every account, which is precisely the failure mode this
-whole exercise exists to remove.
+### 4.1 `accounts` was excluded, and that was a mistake
 
-What is given up is small and worth stating: `accounts` holds addresses, labels, hierarchy
-delimiters and **encrypted** source-mailbox credentials. No message bodies, no subjects, no
-senders. The question this plan answers is whether one user's *mail* can reach another, and
-mail lives in the three tables above.
+The first cut left `accounts` open, because `email-archiver ingest <address>` starts from
+an address and must discover its owner before it can declare an identity. The cost was
+written down as small: "addresses, labels, hierarchy delimiters and **encrypted** source
+credentials. No message bodies, no subjects, no senders."
 
-`_sqlx_migrations` likewise: no user data, and migrations run before any identity is set.
+**That weighed the wrong thing.** `accounts.imap_password_enc` is encrypted with a key the
+application already holds (`db::source_for` decrypts it in the normal course of ingest). A
+path reading another user's account row therefore does not learn metadata — it recovers
+their **live source mailbox password** and can sign into their real mail server. That is a
+larger prize than the archive it was being weighed against.
 
----
+The bootstrap was a lookup problem, not a reason to leave credentials readable.
+`db::owner_of_address` resolves an address to its owner by walking `users` — which has no
+policy — and asking each in a scope. A handful of rows, once per CLI invocation.
 
 ## 5. Setting the identity — the part most likely to go wrong
 

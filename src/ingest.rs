@@ -204,7 +204,13 @@ async fn connect(source: &Source) -> Result<Session> {
 
 /// Ingest every folder of one account.
 pub async fn run(config: &Config, pool: &PgPool, address: &str) -> Result<()> {
-    let account = db::account_by_address(pool, address).await?;
+    // accounts is policy-covered, so the owner has to be resolved first --
+    // through `users`, which is not. See db::owner_of_address.
+    let owner = db::owner_of_address(pool, address).await?;
+    let account = {
+        let mut scope = db::Scope::begin(pool, owner).await?;
+        db::account_by_address(&mut scope, address).await?
+    };
     let key = config.key()?;
     let source = db::source_for(pool, &key, address).await?;
     // Arc so every concurrent task shares one S3 client and its connection pool.
