@@ -17,6 +17,11 @@
 
 use email_archiver::{config::Config, db};
 
+/// Open a scope the same way the server does.
+async fn scope(pool: &sqlx::PgPool, user_id: i64) -> db::Scope<'_> {
+    db::Scope::begin(pool, user_id).await.expect("scope")
+}
+
 /// Load the config the same way the binary does, or `None` if unavailable.
 async fn pool() -> Option<(sqlx::PgPool, i64)> {
     let path = std::env::var("EMAIL_ARCHIVER_CONFIG").unwrap_or_else(|_| "config.toml".into());
@@ -53,7 +58,7 @@ async fn search_maps_every_column_it_selects() {
     // "a" appears in essentially every mailbox, so this returns rows on any
     // archive with content -- the point is to exercise the mapping, not to
     // assert on particular mail.
-    let rows = db::search(&pool, user_id, "a", None, None, 5)
+    let rows = db::search(&mut scope(&pool, user_id).await, "a", None, None, 5)
         .await
         .expect("search must not fail to map its own columns");
 
@@ -78,13 +83,15 @@ async fn search_scopes_to_the_user() {
 
     // A user id that cannot exist returns nothing rather than everything --
     // the guard against a missing WHERE clause silently exposing the archive.
-    let rows = db::search(&pool, -1, "a", None, None, 5).await.unwrap();
+    let rows = db::search(&mut scope(&pool, -1).await, "a", None, None, 5)
+        .await
+        .unwrap();
     assert!(
         rows.is_empty(),
         "search returned rows for a non-existent user"
     );
 
-    let mine = db::search(&pool, user_id, "a", None, None, 5)
+    let mine = db::search(&mut scope(&pool, user_id).await, "a", None, None, 5)
         .await
         .unwrap();
     assert!(!mine.is_empty(), "expected the real user to have results");
@@ -102,7 +109,7 @@ async fn search_treats_wildcards_as_literal_text() {
     // Asserting on the CONTENT, not on counts: both queries hit the same limit,
     // so comparing lengths proves nothing -- which is how an earlier version of
     // this test managed to fail while the code was correct.
-    for row in db::search(&pool, user_id, "%", None, None, 20)
+    for row in db::search(&mut scope(&pool, user_id).await, "%", None, None, 20)
         .await
         .unwrap()
     {
@@ -115,7 +122,7 @@ async fn search_treats_wildcards_as_literal_text() {
     }
 
     // Same for '_', which matches any single character when unescaped.
-    for row in db::search(&pool, user_id, "_", None, None, 20)
+    for row in db::search(&mut scope(&pool, user_id).await, "_", None, None, 20)
         .await
         .unwrap()
     {
@@ -134,14 +141,16 @@ async fn folders_and_message_pages_map_their_columns_too() {
         return;
     };
 
-    let folders = db::folders_for_user(&pool, user_id).await.expect("folders");
+    let folders = db::folders_for_user(&mut scope(&pool, user_id).await)
+        .await
+        .expect("folders");
     assert!(!folders.is_empty(), "expected folders");
 
     // The largest folder, so paging has something to page through.
     let (folder_id, _, _, _, total, _) = folders.iter().max_by_key(|f| f.4).unwrap().clone();
     assert!(total > 0);
 
-    let page = db::messages_page(&pool, user_id, folder_id, None, 5)
+    let page = db::messages_page(&mut scope(&pool, user_id).await, folder_id, None, 5)
         .await
         .expect("messages_page must map its own columns");
     assert!(!page.is_empty());
@@ -153,8 +162,7 @@ async fn folders_and_message_pages_map_their_columns_too() {
     // Keyset paging: the second page must not repeat the first.
     let last = page.last().unwrap();
     let next = db::messages_page(
-        &pool,
-        user_id,
+        &mut scope(&pool, user_id).await,
         folder_id,
         Some((last.internaldate, last.uid)),
         5,

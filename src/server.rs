@@ -230,7 +230,10 @@ async fn handle(
                 return Ok(false);
             };
 
-            let rows = folder_messages(pool, folder_id).await?;
+            // One scope per command: the transaction lives exactly as long as
+            // the work, not as long as the connection.
+            let mut scope = db::Scope::begin(pool, sess.user_id).await?;
+            let rows = folder_messages(&mut scope, folder_id).await?;
             let names = item_names(&macro_or_item_names);
 
             // Sequence numbers are positions in uid order; UID FETCH addresses
@@ -345,7 +348,7 @@ async fn handle(
             // mail into it.
             let mut names = vec!["INBOX".to_string()];
             names.extend(
-                folders_for(pool, sess.user_id)
+                folders_for(&mut db::Scope::begin(pool, sess.user_id).await?)
                     .await?
                     .into_iter()
                     .map(|(_, n)| n),
@@ -379,7 +382,8 @@ async fn handle(
             let (folder_id, exists, uidvalidity, uidnext) = if wanted == "INBOX" {
                 (None, 0i64, 1i64, 1i64)
             } else {
-                match folder_meta(pool, sess.user_id, &wanted).await? {
+                let mut scope = db::Scope::begin(pool, sess.user_id).await?;
+                match folder_meta(&mut scope, &wanted).await? {
                     Some(m) => (Some(m.0), m.1, m.2, m.3),
                     None => {
                         no(server, tag, "no such mailbox");
@@ -445,7 +449,14 @@ async fn handle(
 ///
 /// Namespaced by account because one archive user may hold several source
 /// mailboxes, each with its own INBOX — they cannot all be called INBOX.
-async fn folders_for(pool: &PgPool, user_id: i64) -> Result<Vec<(i64, String)>> {
+/// A scope is opened per COMMAND rather than per connection.
+///
+/// An IMAP connection can stay open for days; holding one transaction across
+/// it would pin a pooled connection and an MVCC snapshot for the whole
+/// session, so the client would stop seeing new mail and the pool would
+/// starve. A command is the natural unit of work.
+async fn folders_for(scope: &mut db::Scope<'_>) -> Result<Vec<(i64, String)>> {
+    let user_id = scope.user_id();
     let rows: Vec<(i64, String, String, Option<String>)> = sqlx::query_as(
         "SELECT f.id, a.label, f.name, a.hierarchy_delimiter
          FROM folders f JOIN accounts a ON a.id = f.account_id
@@ -453,7 +464,7 @@ async fn folders_for(pool: &PgPool, user_id: i64) -> Result<Vec<(i64, String)>> 
          ORDER BY a.label, f.name",
     )
     .bind(user_id)
-    .fetch_all(pool)
+    .fetch_all(scope.conn())
     .await?;
     Ok(rows
         .into_iter()
@@ -474,7 +485,7 @@ pub struct Row {
     pub headers: Option<Vec<u8>>,
 }
 
-async fn folder_messages(pool: &PgPool, folder_id: i64) -> Result<Vec<Row>> {
+async fn folder_messages(scope: &mut db::Scope<'_>, folder_id: i64) -> Result<Vec<Row>> {
     let rows: Vec<(
         i64,
         String,
@@ -489,7 +500,7 @@ async fn folder_messages(pool: &PgPool, folder_id: i64) -> Result<Vec<Row>> {
          ORDER BY p.uid",
     )
     .bind(folder_id)
-    .fetch_all(pool)
+    .fetch_all(scope.conn())
     .await?;
     Ok(rows
         .into_iter()
@@ -589,10 +600,10 @@ fn build_item(
 
 /// (folder id, message count, our uidvalidity, our uidnext)
 async fn folder_meta(
-    pool: &PgPool,
-    user_id: i64,
+    scope: &mut db::Scope<'_>,
     display_name: &str,
 ) -> Result<Option<(i64, i64, i64, i64)>> {
+    let user_id = scope.user_id();
     // Translate back to the source name before looking up. The stored name is
     // whatever the source called it; only the presentation uses our delimiter.
     let (label, rest) = match display_name.split_once('/') {
@@ -605,7 +616,7 @@ async fn folder_meta(
     )
     .bind(user_id)
     .bind(label)
-    .fetch_optional(pool)
+    .fetch_optional(scope.conn())
     .await?
     .flatten();
     let source_name = naming::from_display(rest, delim.and_then(|d| d.chars().next()));
@@ -618,7 +629,7 @@ async fn folder_meta(
     .bind(user_id)
     .bind(label)
     .bind(&source_name)
-    .fetch_optional(pool)
+    .fetch_optional(scope.conn())
     .await?;
 
     let Some((id, uidvalidity, uidnext)) = row else {
@@ -626,7 +637,7 @@ async fn folder_meta(
     };
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM placements WHERE folder_id = $1")
         .bind(id)
-        .fetch_one(pool)
+        .fetch_one(scope.conn())
         .await?;
     Ok(Some((id, count, uidvalidity, uidnext)))
 }

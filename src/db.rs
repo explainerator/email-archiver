@@ -33,6 +33,74 @@ pub struct Folder {
     pub last_source_uid: i64,
 }
 
+/// A database identity, and the transaction it is scoped to.
+///
+/// **This is the only way to read mail.** Once row-level security is enabled
+/// (RLS-PLAN.md phases 3-4) every policy compares against
+/// `archive.user_id`, and this type is what sets it.
+///
+/// Three properties, each deliberate:
+///
+/// * **The identity and the query's `user_id` are the same value.** Query
+///   functions take a `Scope` rather than a `pool` and a separate id, so there
+///   is no second argument that could disagree with the session setting.
+/// * **`SET LOCAL`, never `SET`.** A plain `SET` persists on a pooled
+///   connection, so the next request to borrow it would inherit this identity —
+///   worse than no RLS at all, because it turns a scoping bug into a
+///   timing-dependent cross-user leak. `SET LOCAL` unwinds when the transaction
+///   ends, whether or not our code remembers.
+/// * **Dropping is safe.** sqlx rolls back an uncommitted transaction on drop,
+///   which both discards nothing (reads) and clears the setting.
+pub struct Scope<'c> {
+    tx: sqlx::Transaction<'c, sqlx::Postgres>,
+    user_id: i64,
+}
+
+impl<'c> Scope<'c> {
+    /// Open a transaction and declare who is asking.
+    pub async fn begin(pool: &'c PgPool, user_id: i64) -> Result<Scope<'c>> {
+        let mut tx = pool
+            .begin()
+            .await
+            .context("beginning a scoped transaction")?;
+
+        // `set_config(..., is_local => true)` rather than `SET LOCAL`, because
+        // SET takes no bind parameters and would need the value formatted into
+        // the statement. An i64 cannot carry SQL syntax so that would in fact be
+        // safe, but "this particular interpolation happens to be fine" is a
+        // rule that decays the moment someone adds a second one.
+        sqlx::query("SELECT set_config('archive.user_id', $1, true)")
+            .bind(user_id.to_string())
+            .execute(&mut *tx)
+            .await
+            .context("setting the scoped user identity")?;
+
+        Ok(Scope { tx, user_id })
+    }
+
+    pub fn user_id(&self) -> i64 {
+        self.user_id
+    }
+
+    /// The connection to run statements on.
+    ///
+    /// Exposed because several queries live outside this module — the IMAP
+    /// server builds its own. They still go through a `Scope`, so they are
+    /// covered by the same policy.
+    pub fn conn(&mut self) -> &mut sqlx::PgConnection {
+        &mut self.tx
+    }
+
+    /// Commit. Required for writes; reads may simply drop the scope.
+    pub async fn commit(self) -> Result<()> {
+        self.tx
+            .commit()
+            .await
+            .context("committing a scoped transaction")?;
+        Ok(())
+    }
+}
+
 pub async fn create_user(pool: &PgPool, login: &str, bucket: &str, display: &str) -> Result<i64> {
     // password_hash is a placeholder until IMAP auth lands in Phase 4. It is
     // deliberately not a valid hash, so nothing can authenticate as this user
@@ -498,9 +566,9 @@ pub async fn authenticate(
 /// becomes slow at real volume, a cached count is a schema change to make with
 /// evidence, not in advance.
 pub async fn folders_for_user(
-    pool: &PgPool,
-    user_id: i64,
+    scope: &mut Scope<'_>,
 ) -> Result<Vec<(i64, String, String, Option<String>, i64, i64)>> {
+    let user_id = scope.user_id();
     let rows: Vec<(i64, String, String, Option<String>, i64, i64)> = sqlx::query_as(
         "SELECT f.id,
                 a.label,
@@ -516,7 +584,7 @@ pub async fn folders_for_user(
           ORDER BY a.label, f.name",
     )
     .bind(user_id)
-    .fetch_all(pool)
+    .fetch_all(scope.conn())
     .await?;
 
     Ok(rows)
@@ -533,12 +601,12 @@ pub async fn folders_for_user(
 /// else's mail: the join to `accounts` makes ownership part of the query rather
 /// than a check a handler might forget.
 pub async fn messages_page(
-    pool: &PgPool,
-    user_id: i64,
+    scope: &mut Scope<'_>,
     folder_id: i64,
     cursor: Option<(chrono::DateTime<chrono::Utc>, i64)>,
     limit: i64,
 ) -> Result<Vec<MessageRow>> {
+    let user_id = scope.user_id();
     let (before_date, before_uid) = match cursor {
         Some((d, u)) => (Some(d), Some(u)),
         None => (None, None),
@@ -578,7 +646,7 @@ pub async fn messages_page(
     .bind(before_date)
     .bind(before_uid)
     .bind(limit)
-    .fetch_all(pool)
+    .fetch_all(scope.conn())
     .await?;
 
     Ok(rows)
@@ -608,10 +676,10 @@ pub struct MessageRow {
 /// Returns the bucket rather than taking one, so no caller has to decide which
 /// bucket a message belongs in and none can get it wrong.
 pub async fn message_for_user(
-    pool: &PgPool,
-    user_id: i64,
+    scope: &mut Scope<'_>,
     blake3: &str,
 ) -> Result<Option<(String, i64, chrono::DateTime<chrono::Utc>)>> {
+    let user_id = scope.user_id();
     let row: Option<(String, i64, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
         "SELECT u.bucket, m.size, m.internaldate
            FROM messages m
@@ -620,7 +688,7 @@ pub async fn message_for_user(
     )
     .bind(user_id)
     .bind(blake3)
-    .fetch_optional(pool)
+    .fetch_optional(scope.conn())
     .await?;
 
     Ok(row)
@@ -631,13 +699,8 @@ pub async fn message_for_user(
 /// The scoping join is what makes a guessed folder/uid pair harmless: without
 /// it, any authenticated user could flip read state on anyone's mail. Postgres
 /// does not allow a JOIN in UPDATE directly, so ownership is a subquery.
-pub async fn set_seen(
-    pool: &PgPool,
-    user_id: i64,
-    folder_id: i64,
-    uid: i64,
-    seen: bool,
-) -> Result<bool> {
+pub async fn set_seen(scope: &mut Scope<'_>, folder_id: i64, uid: i64, seen: bool) -> Result<bool> {
+    let user_id = scope.user_id();
     let result = sqlx::query(
         "UPDATE placements SET seen = $4
           WHERE folder_id = $2
@@ -652,7 +715,7 @@ pub async fn set_seen(
     .bind(folder_id)
     .bind(uid)
     .bind(seen)
-    .execute(pool)
+    .execute(scope.conn())
     .await?;
 
     Ok(result.rows_affected() > 0)
@@ -672,13 +735,13 @@ pub async fn set_seen(
 /// Scoped by `user_id` like every other read here, so search can never reach
 /// another person's mail.
 pub async fn search(
-    pool: &PgPool,
-    user_id: i64,
+    scope: &mut Scope<'_>,
     query: &str,
     folder_id: Option<i64>,
     cursor: Option<(chrono::DateTime<chrono::Utc>, i64)>,
     limit: i64,
 ) -> Result<Vec<SearchRow>> {
+    let user_id = scope.user_id();
     // The caller supplies a substring, not a pattern: % and _ are wildcards in
     // LIKE, so a query containing them would silently mean something other than
     // what was typed.
@@ -762,7 +825,7 @@ pub async fn search(
     .bind(before_date)
     .bind(before_uid)
     .bind(limit)
-    .fetch_all(pool)
+    .fetch_all(scope.conn())
     .await?;
 
     Ok(rows)
@@ -790,11 +853,12 @@ pub struct SearchRow {
 ///
 /// Separate from `authenticate` because the caller already holds a verified
 /// session and is asking "who is this", not "is this password right".
-pub async fn user_by_id(pool: &PgPool, user_id: i64) -> Result<Option<(String, String)>> {
+pub async fn user_by_id(scope: &mut Scope<'_>) -> Result<Option<(String, String)>> {
+    let user_id = scope.user_id();
     let row: Option<(String, Option<String>)> =
         sqlx::query_as("SELECT login, display_name FROM users WHERE id = $1")
             .bind(user_id)
-            .fetch_optional(pool)
+            .fetch_optional(scope.conn())
             .await?;
 
     // display_name is nullable; falling back to the login keeps the API's shape

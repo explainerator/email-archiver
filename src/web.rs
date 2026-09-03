@@ -280,6 +280,22 @@ fn router(state: AppState, assets: Option<PathBuf>) -> Result<Router> {
     Ok(app)
 }
 
+/// Open a database scope for the caller, or the response to send instead.
+///
+/// Every read of mail goes through one of these. The identity comes from the
+/// session's `UserScope`, so the value the policy compares against and the
+/// value the query binds are the same thing rather than two arguments that
+/// could drift apart.
+async fn scoped<'a>(
+    state: &'a AppState,
+    caller: UserScope,
+    what: &str,
+) -> Result<db::Scope<'a>, Response> {
+    db::Scope::begin(&state.pool, caller.user_id())
+        .await
+        .map_err(|e| internal(what, e))
+}
+
 /// 404 for an unmatched /api path, in the same JSON shape as every other error
 /// so a client has one thing to parse.
 async fn api_not_found() -> Response {
@@ -409,7 +425,11 @@ async fn login(
     state.limiter.clear(&by_login);
     state.limiter.clear(&by_peer);
 
-    let identity = match db::user_by_id(&state.pool, user_id).await {
+    let identity = match db::Scope::begin(&state.pool, user_id).await {
+        Ok(mut db_scope) => db::user_by_id(&mut db_scope).await,
+        Err(e) => Err(e),
+    };
+    let identity = match identity {
         Ok(Some((login, display_name))) => Identity {
             login,
             display_name,
@@ -471,7 +491,11 @@ async fn logout(State(state): State<AppState>) -> impl IntoResponse {
 /// Requires a valid session — `UserScope` cannot be constructed without one, so
 /// this is also the endpoint that demonstrates the phase 2 gate.
 async fn whoami(State(state): State<AppState>, scope: UserScope) -> Response {
-    let identity = match db::user_by_id(&state.pool, scope.user_id()).await {
+    let mut db_scope = match scoped(&state, scope, "session").await {
+        Ok(s) => s,
+        Err(response) => return response,
+    };
+    let identity = match db::user_by_id(&mut db_scope).await {
         Ok(Some((login, display_name))) => Identity {
             login,
             display_name,
@@ -526,7 +550,11 @@ async fn whoami(State(state): State<AppState>, scope: UserScope) -> Response {
 
 /// Folders visible to this user, with counts.
 async fn folders(State(state): State<AppState>, scope: UserScope) -> Response {
-    let rows = match db::folders_for_user(&state.pool, scope.user_id()).await {
+    let mut db_scope = match scoped(&state, scope, "folders").await {
+        Ok(s) => s,
+        Err(response) => return response,
+    };
+    let rows = match db::folders_for_user(&mut db_scope).await {
         Ok(rows) => rows,
         Err(e) => return internal("folders", e),
     };
@@ -597,11 +625,14 @@ async fn messages(
 
     // Fetch one more than asked for: if it comes back, there is another page.
     // Cheaper and more accurate than a separate COUNT, which would race.
-    let rows =
-        match db::messages_page(&state.pool, scope.user_id(), folder_id, cursor, limit + 1).await {
-            Ok(rows) => rows,
-            Err(e) => return internal("messages", e),
-        };
+    let mut db_scope = match scoped(&state, scope, "messages").await {
+        Ok(s) => s,
+        Err(response) => return response,
+    };
+    let rows = match db::messages_page(&mut db_scope, folder_id, cursor, limit + 1).await {
+        Ok(rows) => rows,
+        Err(e) => return internal("messages", e),
+    };
 
     let has_more = rows.len() as i64 > limit;
     let rows = &rows[..rows.len().min(limit as usize)];
@@ -793,7 +824,11 @@ async fn message(
 
     // Authorises and locates in one query: the bucket comes back from the row,
     // so this handler never chooses which bucket to read.
-    let found = match db::message_for_user(&state.pool, scope.user_id(), &blake3).await {
+    let mut db_scope = match scoped(&state, scope, "message lookup").await {
+        Ok(s) => s,
+        Err(response) => return response,
+    };
+    let found = match db::message_for_user(&mut db_scope, &blake3).await {
         Ok(found) => found,
         Err(e) => return internal("message lookup", e),
     };
@@ -933,7 +968,11 @@ async fn inline_part(
         return (StatusCode::BAD_REQUEST, "malformed message id").into_response();
     }
 
-    let found = match db::message_for_user(&state.pool, scope.user_id(), &blake3).await {
+    let mut db_scope = match scoped(&state, scope, "inline lookup").await {
+        Ok(s) => s,
+        Err(response) => return response,
+    };
+    let found = match db::message_for_user(&mut db_scope, &blake3).await {
         Ok(found) => found,
         Err(e) => return internal("inline lookup", e),
     };
@@ -1025,7 +1064,11 @@ async fn download_part(
         return (StatusCode::BAD_REQUEST, "malformed message id").into_response();
     }
 
-    let found = match db::message_for_user(&state.pool, scope.user_id(), &blake3).await {
+    let mut db_scope = match scoped(&state, scope, "attachment lookup").await {
+        Ok(s) => s,
+        Err(response) => return response,
+    };
+    let found = match db::message_for_user(&mut db_scope, &blake3).await {
         Ok(found) => found,
         Err(e) => return internal("attachment lookup", e),
     };
@@ -1116,7 +1159,21 @@ async fn set_seen(
     Path((folder_id, uid)): Path<(i64, i64)>,
     Json(body): Json<SeenRequest>,
 ) -> Response {
-    match db::set_seen(&state.pool, scope.user_id(), folder_id, uid, body.seen).await {
+    let mut db_scope = match scoped(&state, scope, "set seen").await {
+        Ok(s) => s,
+        Err(response) => return response,
+    };
+    let outcome = db::set_seen(&mut db_scope, folder_id, uid, body.seen).await;
+
+    // The only write in the API, and the only place a commit is required:
+    // reads may simply drop the scope and let sqlx roll back.
+    if matches!(outcome, Ok(true)) {
+        if let Err(e) = db_scope.commit().await {
+            return internal("set seen commit", e);
+        }
+    }
+
+    match outcome {
         Ok(true) => (StatusCode::NO_CONTENT, ()).into_response(),
         // The placement does not exist, or belongs to someone else. Not
         // distinguished, for the same reason as everywhere else.
@@ -1176,16 +1233,11 @@ async fn search(
         }
     };
 
-    let rows = match db::search(
-        &state.pool,
-        scope.user_id(),
-        &term,
-        q.folder,
-        cursor,
-        limit + 1,
-    )
-    .await
-    {
+    let mut db_scope = match scoped(&state, scope, "search").await {
+        Ok(s) => s,
+        Err(response) => return response,
+    };
+    let rows = match db::search(&mut db_scope, &term, q.folder, cursor, limit + 1).await {
         Ok(rows) => rows,
         Err(e) => return internal("search", e),
     };

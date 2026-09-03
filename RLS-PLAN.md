@@ -1,6 +1,7 @@
 # Row-Level Security for the archive
 
-Status: **phase 1 done**, phases 2-5 outstanding. Companion to `ARCHIVE-PLAN.md` and `WEBAPP-PLAN.md`.
+Status: **phase 1 done, phase 2 partly done** (serving paths scoped; CLI paths
+outstanding). Phases 3-5 outstanding. Companion to `ARCHIVE-PLAN.md` and `WEBAPP-PLAN.md`.
 
 ---
 
@@ -155,11 +156,22 @@ COMMIT;
 This must be a single helper that every read goes through, not a convention. If it is
 possible to run a query outside it, one eventually will be.
 
-**Latency.** Three round trips instead of one. At the 128 ms baseline measured from a
-development machine that is ~380 ms per request; from the instance, where the database is
-a fraction of a millisecond away, it is noise. `BEGIN` and `SET LOCAL` can be sent as one
-statement, keeping it to three rather than four. The cost lands almost entirely on local
-development, which is the right place for it to land.
+**Latency — measured, and cheaper than estimated.** The guess above was ~380 ms of added
+round trips per request. Actual, against the live archive from a development machine:
+
+| | Before | Scoped | Added |
+|---|---|---|---|
+| Opening a scope (`BEGIN` + `set_config`) | — | 158 ms | 158 ms |
+| Folder list (46 folders) | ~146 ms query | 298 ms total | ~150 ms |
+| Message page (51 rows) | ~180 ms | 404 ms | ~220 ms |
+| Search (51 rows) | ~435 ms | 506 ms | ~70 ms |
+
+So roughly one to two extra round trips, not three — `BEGIN` is cheap and partly overlaps.
+The rollback on drop is not on the critical path: sqlx cannot await in `Drop`, so it queues
+the `ROLLBACK` to run before the connection is reused.
+
+From the instance, where the database is a fraction of a millisecond away, all of this is
+noise. The cost lands on local development, which is the right place for it to land.
 
 ---
 
@@ -191,7 +203,7 @@ Each phase is independently deployable and leaves the system working.
 | Phase | Work | Gate |
 |---|---|---|
 | **1** | ✅ Migration: `user_id` on `folders` and `placements`, backfilled, with the composite FK of §3. **No RLS yet.** | Done — 152,741 placements and 46 folders backfilled, zero nulls, zero mismatches; a deliberate wrong-owner update is rejected by the FK |
-| **2** | `db::scoped()` helper: transaction + `SET LOCAL`. Route every read through it. Still no RLS, so behaviour is unchanged and any mistake is visible as a normal bug | All existing queries still return what they did; integration tests green |
+| **2** | ✅ Serving paths (web + IMAP) · ⬜ CLI paths (ingest, check, diagnose) | Web and IMAP reads all go through `db::Scope`. **The CLI paths must follow before phase 3**, or enabling RLS will break ingest |
 | **3** | Enable RLS + FORCE + policy on **`accounts` only** — the smallest table, and the one whose breakage is most obvious | Login, folder list and ingest all still work |
 | **4** | The same on `folders`, `messages`, `placements` | Full app exercised: browse, read, search, download, ingest |
 | **5** | Verification: no-identity queries return zero rows; a second user's ids return zero rows; startup self-check | Tests assert the policy, not just the `WHERE` clause |
