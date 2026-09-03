@@ -844,12 +844,19 @@ pub async fn source_for(
     key: &crate::secrets::SecretKey,
     address: &str,
 ) -> Result<crate::config::Source> {
+    // accounts carries a policy since migration 0009 -- it holds these very
+    // credentials, decryptable with a key the application already has. So the
+    // read must declare an identity, and the owner is resolved the same way
+    // every other address-named command resolves it.
+    let owner = owner_of_address(pool, address).await?;
+    let mut scope = Scope::begin(pool, owner).await?;
+
     let row: Option<(Option<String>, i32, Option<String>, Option<String>, bool)> = sqlx::query_as(
         "SELECT imap_host, imap_port, imap_username, imap_password_enc, allow_invalid_certs
          FROM accounts WHERE address = $1",
     )
     .bind(address)
-    .fetch_optional(pool)
+    .fetch_optional(scope.conn())
     .await?;
 
     let (host, port, username, password_enc, allow_invalid_certs) =
@@ -914,11 +921,18 @@ pub async fn set_source(
 
 pub async fn set_user_password(pool: &PgPool, login: &str, password: &str) -> Result<()> {
     let hash = crate::secrets::hash_password(password)?;
-    let updated = sqlx::query("UPDATE users SET password_hash = $2 WHERE login = $1")
-        .bind(login)
-        .bind(hash)
-        .execute(pool)
-        .await?;
+
+    // Through user_logins since migration 0011 -- users.login no longer exists,
+    // and this is why an alias sets the password for the same person the
+    // primary address does. There is one password per USER, not per address.
+    let updated = sqlx::query(
+        "UPDATE users SET password_hash = $2
+          WHERE id = (SELECT user_id FROM user_logins WHERE login = $1)",
+    )
+    .bind(login)
+    .bind(hash)
+    .execute(pool)
+    .await?;
     anyhow::ensure!(updated.rows_affected() == 1, "no such user {login:?}");
     Ok(())
 }
@@ -1270,14 +1284,14 @@ pub async fn user_by_id(scope: &mut Scope<'_>) -> Result<Option<(String, String)
 }
 
 pub async fn set_hierarchy_delimiter(
-    pool: &PgPool,
+    scope: &mut Scope<'_>,
     account_id: i64,
     delimiter: Option<char>,
 ) -> Result<()> {
     sqlx::query("UPDATE accounts SET hierarchy_delimiter = $2 WHERE id = $1")
         .bind(account_id)
         .bind(delimiter.map(|c| c.to_string()))
-        .execute(pool)
+        .execute(scope.conn())
         .await?;
     Ok(())
 }

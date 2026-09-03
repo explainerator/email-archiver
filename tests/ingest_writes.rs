@@ -21,6 +21,7 @@ use email_archiver::{config::Config, db};
 const TEST_LOGIN: &str = "write-path-probe@email-archiver.invalid";
 const TEST_BUCKET: &str = "rls-write-path-probe-bucket";
 const TEST_ADDRESS: &str = "probe@write-path.invalid";
+const TEST_ALIAS: &str = "probe-alias@write-path.invalid";
 
 async fn pool() -> Option<sqlx::PgPool> {
     let path = std::env::var("EMAIL_ARCHIVER_CONFIG").unwrap_or_else(|_| "config.toml".into());
@@ -186,5 +187,99 @@ async fn run(pool: &sqlx::PgPool) -> anyhow::Result<()> {
         "placing into a non-existent folder silently succeeded"
     );
 
+    // --- the administrative commands ----------------------------------------
+    // These exercise db functions that no other test touches, because each one
+    // is normally driven by a CLI subcommand against real data. Every one of
+    // them has been broken by a schema change at least once -- silently, since
+    // sqlx checks queries at runtime -- and each break was found by a person
+    // running the command rather than by a test.
+    admin_surface(pool, user_id, folder.id).await?;
+
+    Ok(())
+}
+
+/// Drive the command surface that schema changes keep breaking.
+async fn admin_surface(pool: &sqlx::PgPool, user_id: i64, folder_id: i64) -> anyhow::Result<()> {
+    // set-password. Broke when migration 0011 dropped users.login; the query
+    // still said `WHERE login = $1` and failed only when someone set a
+    // password.
+    db::set_user_password(pool, TEST_LOGIN, "not-a-real-password").await?;
+    let authenticated = db::authenticate(pool, TEST_LOGIN, "not-a-real-password").await?;
+    anyhow::ensure!(authenticated.is_some(), "set-password did not take effect");
+    anyhow::ensure!(
+        db::authenticate(pool, TEST_LOGIN, "wrong").await?.is_none(),
+        "authentication accepted a wrong password"
+    );
+
+    // An alias must reach the same user: one password per person, not per
+    // address.
+    db::add_alias(pool, TEST_LOGIN, TEST_ALIAS).await?;
+    anyhow::ensure!(
+        db::authenticate(pool, TEST_ALIAS, "not-a-real-password")
+            .await?
+            .is_some(),
+        "an alias could not authenticate"
+    );
+
+    // set-source / source_for. Broke when migration 0009 gave `accounts` a
+    // policy: the read ran unscoped, returned nothing, and reported the account
+    // as missing.
+    let key = email_archiver::secrets::SecretKey::generate()?;
+    let key = email_archiver::secrets::SecretKey::from_base64(&key)?;
+    db::set_source(
+        pool,
+        &key,
+        TEST_ADDRESS,
+        "imap.invalid",
+        993,
+        "probe",
+        "probe-password",
+        false,
+    )
+    .await?;
+
+    let source = db::source_for(pool, &key, TEST_ADDRESS).await?;
+    anyhow::ensure!(source.host == "imap.invalid", "source_for lost the host");
+    anyhow::ensure!(
+        matches!(source.auth, email_archiver::config::Auth::Password(ref p) if p == "probe-password"),
+        "source_for did not round-trip the password"
+    );
+
+    // set_hierarchy_delimiter. Broke the same way, and worse: an UPDATE that
+    // silently affects zero rows leaves folder names wrong with no error.
+    let account_id: i64 = {
+        let mut scope = db::Scope::begin(pool, user_id).await?;
+        sqlx::query_scalar("SELECT id FROM accounts WHERE address = $1")
+            .bind(TEST_ADDRESS)
+            .fetch_one(scope.conn())
+            .await?
+    };
+    {
+        let mut scope = db::Scope::begin(pool, user_id).await?;
+        db::set_hierarchy_delimiter(&mut scope, account_id, Some('.')).await?;
+        scope.commit().await?;
+    }
+    let stored: Option<String> = {
+        let mut scope = db::Scope::begin(pool, user_id).await?;
+        sqlx::query_scalar("SELECT hierarchy_delimiter FROM accounts WHERE id = $1")
+            .bind(account_id)
+            .fetch_one(scope.conn())
+            .await?
+    };
+    anyhow::ensure!(
+        stored.as_deref() == Some("."),
+        "the hierarchy delimiter was not stored (an unscoped UPDATE affects zero rows silently)"
+    );
+
+    // The listings, which are how a person notices any of the above.
+    let users = db::all_users(pool).await?;
+    anyhow::ensure!(
+        users.iter().any(|u| u.login == TEST_LOGIN),
+        "`users` did not list the probe"
+    );
+    let accounts = db::accounts_for_user(pool, user_id).await?;
+    anyhow::ensure!(!accounts.is_empty(), "`accounts` listed nothing");
+
+    let _ = folder_id;
     Ok(())
 }

@@ -305,7 +305,11 @@ pub async fn run(config: &Config, pool: &PgPool, address: &str) -> Result<()> {
         names
     };
 
-    db::set_hierarchy_delimiter(pool, account.id, delimiter).await?;
+    {
+        let mut scope = db::Scope::begin(pool, account.user_id).await?;
+        db::set_hierarchy_delimiter(&mut scope, account.id, delimiter).await?;
+        scope.commit().await?;
+    }
     println!("  source hierarchy delimiter: {delimiter:?}");
 
     println!(
