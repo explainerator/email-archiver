@@ -35,16 +35,43 @@ async fn pool() -> Option<sqlx::PgPool> {
 }
 
 /// Remove the probe's rows, children first. Safe to call when nothing exists.
+///
+/// The three mail tables carry a policy, so their deletes must run inside a
+/// scope or they match nothing and leave the rows behind — which is exactly
+/// what happened the first time this ran under RLS, cascading into foreign-key
+/// failures on the tables that follow. `accounts` and `users` have no policy
+/// and are deleted afterwards, unscoped.
 async fn cleanup(pool: &sqlx::PgPool) {
-    let statements = [
-        "DELETE FROM placements WHERE user_id = (SELECT id FROM users WHERE login = $1)",
-        "DELETE FROM messages   WHERE user_id = (SELECT id FROM users WHERE login = $1)",
-        "DELETE FROM folders    WHERE user_id = (SELECT id FROM users WHERE login = $1)",
-        "DELETE FROM accounts   WHERE user_id = (SELECT id FROM users WHERE login = $1)",
-        "DELETE FROM users      WHERE login = $1",
-    ];
-    for sql in statements {
-        if let Err(e) = sqlx::query(sql).bind(TEST_LOGIN).execute(pool).await {
+    let id: Option<i64> = sqlx::query_scalar("SELECT id FROM users WHERE login = $1")
+        .bind(TEST_LOGIN)
+        .fetch_optional(pool)
+        .await
+        .unwrap_or(None);
+    let Some(id) = id else { return };
+
+    match db::Scope::begin(pool, id).await {
+        Ok(mut scope) => {
+            for sql in [
+                "DELETE FROM placements WHERE user_id = $1",
+                "DELETE FROM messages   WHERE user_id = $1",
+                "DELETE FROM folders    WHERE user_id = $1",
+            ] {
+                if let Err(e) = sqlx::query(sql).bind(id).execute(scope.conn()).await {
+                    eprintln!("cleanup failed on {sql}: {e}");
+                }
+            }
+            if let Err(e) = scope.commit().await {
+                eprintln!("cleanup commit failed: {e}");
+            }
+        }
+        Err(e) => eprintln!("cleanup could not open a scope: {e}"),
+    }
+
+    for sql in [
+        "DELETE FROM accounts WHERE user_id = $1",
+        "DELETE FROM users    WHERE id = $1",
+    ] {
+        if let Err(e) = sqlx::query(sql).bind(id).execute(pool).await {
             eprintln!("cleanup failed on {sql}: {e}");
         }
     }
@@ -76,10 +103,15 @@ async fn run(pool: &sqlx::PgPool) -> anyhow::Result<()> {
     let folder = db::folder_for_ingest(&mut scope, account_id, "Probe", 1).await?;
     scope.commit().await?;
 
+    // Read back through a scope. Unscoped, the policy hides the row and this
+    // fails with "no rows returned" -- which is the mechanism working, and is
+    // how this test first proved the policy was live.
+    let mut scope = db::Scope::begin(pool, user_id).await?;
     let folder_owner: i64 = sqlx::query_scalar("SELECT user_id FROM folders WHERE id = $1")
         .bind(folder.id)
-        .fetch_one(pool)
+        .fetch_one(scope.conn())
         .await?;
+    drop(scope);
     anyhow::ensure!(
         folder_owner == user_id,
         "folder owner {folder_owner} should be {user_id}"
@@ -104,12 +136,14 @@ async fn run(pool: &sqlx::PgPool) -> anyhow::Result<()> {
     anyhow::ensure!(created, "placement should be new");
     scope.commit().await?;
 
+    let mut scope = db::Scope::begin(pool, user_id).await?;
     let placement_owner: i64 =
         sqlx::query_scalar("SELECT user_id FROM placements WHERE folder_id = $1 AND uid = $2")
             .bind(folder.id)
             .bind(uid)
-            .fetch_one(pool)
+            .fetch_one(scope.conn())
             .await?;
+    drop(scope);
     anyhow::ensure!(
         placement_owner == user_id,
         "placement owner {placement_owner} should be {user_id}"

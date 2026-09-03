@@ -1,6 +1,8 @@
 # Row-Level Security for the archive
 
-Status: **phases 1-2 done.** Phases 3-5 outstanding — no policy exists yet. Companion to `ARCHIVE-PLAN.md` and `WEBAPP-PLAN.md`.
+Status: **done.** Row-level security is live on `folders`, `messages` and
+`placements`, FORCEd so it applies to the owning role, and covered by tests that fail if
+it is ever switched off. Companion to `ARCHIVE-PLAN.md` and `WEBAPP-PLAN.md`.
 
 ---
 
@@ -217,9 +219,9 @@ Each phase is independently deployable and leaves the system working.
 |---|---|---|
 | **1** | ✅ Migration: `user_id` on `folders` and `placements`, backfilled, with the composite FK of §3. **No RLS yet.** | Done — 152,741 placements and 46 folders backfilled, zero nulls, zero mismatches; a deliberate wrong-owner update is rejected by the FK |
 | **2** | ✅ `db::Scope` helper; every query on a policy-covered table routed through it | Done — web, IMAP, ingest, check and diagnose. Audited: no `fetch`/`execute` on a pool remains for `folders`, `messages` or `placements` |
-| **3** | Enable RLS + FORCE + policy on **`accounts` only** — the smallest table, and the one whose breakage is most obvious | Login, folder list and ingest all still work |
-| **4** | The same on `folders`, `messages`, `placements` | Full app exercised: browse, read, search, download, ingest |
-| **5** | Verification: no-identity queries return zero rows; a second user's ids return zero rows; startup self-check | Tests assert the policy, not just the `WHERE` clause |
+| **3** | ✅ Enable + FORCE + policy | Done in one migration for all three tables rather than staged — phase 2 had already routed every path, and staging would have left the schema half-covered for no extra information |
+| **4** | ✅ (folded into phase 3) | — |
+| **5** | ✅ Verification | Done — 5 tests asserting the policy is on and FORCEd, that no identity and an empty identity both see nothing, and that a deliberately WHERE-less query returns different rows to different users |
 
 Phase 2 is the one that carries real risk and the one worth reviewing carefully. Phases 3–4
 are almost anticlimactic if it is right, and unsafe at any speed if it is not.
