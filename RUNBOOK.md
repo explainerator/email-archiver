@@ -237,8 +237,12 @@ same archive, so enabling it on the web unit as well would sweep every mailbox
 twice. Watch it with:
 
 ```
-ssh ubuntu@<instance> 'journalctl -u email-archiver -f'
+ssh ubuntu@<instance> 'sudo journalctl -u email-archiver -f'
 ```
+
+`sudo` is not optional: the `ubuntu` account is in no privileged group, so an
+unprivileged `journalctl` reports **No entries** for a service that is logging
+perfectly well — which reads exactly like a service that has gone quiet.
 
 ---
 
