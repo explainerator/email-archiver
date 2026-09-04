@@ -543,9 +543,10 @@ async fn ingest_folder(
     // looks new again. Content-hashed dedup then discards the duplicates, but
     // only after paying to download them, which is the expensive half.
     //
-    // Gmail caps IMAP downloads near 2.5 GB/day and locks the mailbox for a day
-    // once that is passed, so a needless re-fetch of a large folder is not just
-    // slow, it can cost access to the source entirely.
+    // Gmail caps IMAP downloads at 2500 MB/day (Google Workspace admin docs,
+    // "Gmail bandwidth limits"). Passing it suspends the account: typically an
+    // hour, up to 24. So a needless re-fetch of a large folder is not merely
+    // slow, it can cost access to the source outright.
     let uids = {
         let mut scope = db::Scope::begin(pool, account.user_id).await?;
         let held = db::archived_source_uids(&mut scope, folder.id).await?;

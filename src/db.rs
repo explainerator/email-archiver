@@ -854,8 +854,8 @@ pub async fn count_placements(scope: &mut Scope<'_>, folder_id: i64) -> Result<i
 /// every message body from the source, because deduplication is content-hashed
 /// and cannot run until the bytes have already been downloaded. Re-reading
 /// 23,000 messages to discover we held 17,541 of them is not free against
-/// Gmail, which caps IMAP downloads at roughly 2.5 GB/day and locks the mailbox
-/// for a day when the cap is passed.
+/// Gmail, which caps IMAP downloads at 2500 MB/day. Passing that suspends the
+/// account -- Google says typically an hour, up to 24.
 ///
 /// We have recorded `placements.source_uid` since migration 0002, so the set of
 /// what we hold is already on disk and needs no guessing about gaps. Reading it
