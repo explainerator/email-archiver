@@ -126,7 +126,7 @@ async fn run(pool: &sqlx::PgPool) -> anyhow::Result<()> {
     // --- folders -------------------------------------------------------------
     // Through a Scope, exactly as ingest does since RLS phase 2b.
     let mut scope = db::Scope::begin(pool, user_id).await?;
-    let folder = db::folder_for_ingest(&mut scope, account_id, "Probe", 1).await?;
+    let folder = db::folder_for_ingest(&mut scope, account_id, "Probe", 1, None).await?;
     scope.commit().await?;
 
     // Read back through a scope. Unscoped, the policy hides the row and this

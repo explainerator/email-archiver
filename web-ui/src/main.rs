@@ -128,6 +128,9 @@ fn Shell(identity: Identity, auth: Signal<Auth>) -> Element {
     // search remounts those, and a layout preference that reset itself
     // every time you clicked a folder would be worse than no preference.
     let view = use_signal(RowView::load);
+    // Which folder kinds a search covers. Held here so it survives running
+    // one search after another, and remembered across visits.
+    let search_scope = use_signal(SearchScope::load);
 
     // The term that has been SUBMITTED, kept apart from what is being typed:
     // searching per keystroke would fire a ~570 ms query per character.
@@ -167,6 +170,7 @@ fn Shell(identity: Identity, auth: Signal<Auth>) -> Element {
                         value: "{typed}",
                         oninput: move |e| typed.set(e.value()),
                     }
+                    ScopePicker { scope: search_scope }
                     if !query().is_empty() {
                         button {
                             r#type: "button",
@@ -207,8 +211,13 @@ fn Shell(identity: Identity, auth: Signal<Auth>) -> Element {
                         // list rather than filtering within the selected one.
                         (q, _) if !q.is_empty() => rsx! {
                             SearchResults {
-                                key: "{q}",
+                                // The scope is part of the key: changing which
+                                // folders are searched has to re-run the search,
+                                // and remounting is how this component starts
+                                // over rather than appending to stale pages.
+                                key: "{q}-{search_scope().param()}",
                                 query: q,
+                                scope: search_scope(),
                                 opened: open(),
                                 onopen: move |hash| open.set(Some(hash)),
                                 view,
@@ -568,6 +577,137 @@ fn MessageList(
             }
         } else if !messages().is_empty() {
             p { class: "muted pad", "End of folder." }
+        }
+    }
+}
+
+/// Which of the special folder kinds a search looks in.
+///
+/// Trash and Junk are off to begin with. An archive search otherwise returns
+/// the same message three times -- where it lives, in Sent, and in Trash where
+/// an older copy was deleted -- and tens of thousands of junk messages match on
+/// the same words as everything else, crowding out the thing being looked for.
+///
+/// Sent is on: a reply you wrote is usually as good an answer as the message it
+/// replied to, and Sent does not have the volume problem.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct SearchScope {
+    sent: bool,
+    junk: bool,
+    trash: bool,
+}
+
+const SCOPE_KEY: &str = "archive.searchscope";
+
+impl SearchScope {
+    fn load() -> Self {
+        match storage().and_then(|s| s.get_item(SCOPE_KEY).ok().flatten()) {
+            Some(saved) => Self {
+                sent: saved.split(',').any(|kind| kind == "sent"),
+                junk: saved.split(',').any(|kind| kind == "junk"),
+                trash: saved.split(',').any(|kind| kind == "trash"),
+            },
+            None => Self {
+                sent: true,
+                junk: false,
+                trash: false,
+            },
+        }
+    }
+
+    fn save(self) {
+        if let Some(store) = storage() {
+            let _ = store.set_item(SCOPE_KEY, &self.param());
+        }
+    }
+
+    /// The `include` parameter. Empty when nothing extra is wanted, which the
+    /// server reads as "none of the three" rather than as "unspecified".
+    fn param(self) -> String {
+        let mut kinds = Vec::new();
+        if self.sent {
+            kinds.push("sent");
+        }
+        if self.junk {
+            kinds.push("junk");
+        }
+        if self.trash {
+            kinds.push("trash");
+        }
+        kinds.join(",")
+    }
+
+    /// True when anything is excluded, so the control can say so without being
+    /// opened.
+    fn is_narrowed(self) -> bool {
+        !(self.sent && self.junk && self.trash)
+    }
+}
+
+/// The folders-to-search control.
+///
+/// A `details` element rather than a hand-built popover: the browser handles
+/// opening, closing, focus and Escape, and none of that is worth reimplementing
+/// for three checkboxes.
+#[component]
+fn ScopePicker(mut scope: Signal<SearchScope>) -> Element {
+    rsx! {
+        details { class: "scope",
+            summary {
+                class: if scope().is_narrowed() { "narrowed" } else { "" },
+                title: "Folders to search",
+                svg {
+                    view_box: "0 0 16 16",
+                    fill: "none",
+                    stroke: "currentColor",
+                    stroke_width: "1.6",
+                    stroke_linecap: "round",
+                    stroke_linejoin: "round",
+                    path { d: "M2 3.5h12L9.5 8.5v4l-3 1.5v-5.5z" }
+                }
+            }
+            div { class: "scopemenu",
+                p { class: "muted", "Also search" }
+                label {
+                    input {
+                        r#type: "checkbox",
+                        checked: scope().sent,
+                        onchange: move |e| {
+                            let mut next = scope();
+                            next.sent = e.checked();
+                            scope.set(next);
+                            next.save();
+                        },
+                    }
+                    "Sent"
+                }
+                label {
+                    input {
+                        r#type: "checkbox",
+                        checked: scope().junk,
+                        onchange: move |e| {
+                            let mut next = scope();
+                            next.junk = e.checked();
+                            scope.set(next);
+                            next.save();
+                        },
+                    }
+                    "Junk"
+                }
+                label {
+                    input {
+                        r#type: "checkbox",
+                        checked: scope().trash,
+                        onchange: move |e| {
+                            let mut next = scope();
+                            next.trash = e.checked();
+                            scope.set(next);
+                            next.save();
+                        },
+                    }
+                    "Trash"
+                }
+            }
         }
     }
 }
@@ -1027,6 +1167,7 @@ fn sender(message: &MessageSummary) -> String {
 #[component]
 fn SearchResults(
     query: String,
+    scope: SearchScope,
     opened: Option<String>,
     onopen: EventHandler<String>,
     view: Signal<RowView>,
@@ -1044,7 +1185,7 @@ fn SearchResults(
             let query = query.clone();
             async move {
                 loading.set(true);
-                match api::search(&query, None).await {
+                match api::search(&query, None, &scope.param()).await {
                     Ok(page) => {
                         hits.set(page.hits);
                         next.set(page.next);
@@ -1066,7 +1207,7 @@ fn SearchResults(
                 }
                 let Some(cursor) = next() else { return };
                 loading.set(true);
-                match api::search(&query, Some(cursor)).await {
+                match api::search(&query, Some(cursor), &scope.param()).await {
                     Ok(page) => {
                         hits.write().extend(page.hits);
                         next.set(page.next);

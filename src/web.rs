@@ -1193,6 +1193,13 @@ struct SearchQuery {
     folder: Option<i64>,
     cursor: Option<String>,
     limit: Option<i64>,
+    /// Which of the special folder kinds to search, comma-separated: any of
+    /// `sent`, `junk`, `trash`. Absent means `sent` only.
+    ///
+    /// Phrased as what to INCLUDE rather than what to leave out so the default
+    /// is the safe one. An `exclude` parameter would search everything when it
+    /// was forgotten, and forgetting it is exactly what a caller does.
+    include: Option<String>,
 }
 
 /// Substring search over subject and sender.
@@ -1220,6 +1227,27 @@ async fn search(
             .into_response();
     }
 
+    // Junk and Trash are left out unless asked for. A search otherwise returns
+    // the same message three times -- where it lives, in Sent, and in Trash
+    // where an older copy was deleted -- and tens of thousands of junk messages
+    // match on the same words as everything else.
+    let included: Vec<String> = match q.include.as_deref() {
+        None => vec!["sent".to_string()],
+        Some(list) => list
+            .split(',')
+            .map(|kind| kind.trim().to_ascii_lowercase())
+            // An unknown name is dropped rather than rejected: a kind this
+            // server does not know is one it cannot include anyway, and failing
+            // the whole search over it is a worse answer than the search.
+            .filter(|kind| db::SPECIAL_USES.contains(&kind.as_str()))
+            .collect(),
+    };
+    let excluded: Vec<String> = db::SPECIAL_USES
+        .iter()
+        .filter(|kind| !included.iter().any(|chosen| chosen == *kind))
+        .map(|kind| kind.to_string())
+        .collect();
+
     let limit = q.limit.unwrap_or(DEFAULT_PAGE).clamp(1, MAX_PAGE);
     let cursor = match q.cursor.as_deref().map(decode_cursor) {
         None => None,
@@ -1237,7 +1265,8 @@ async fn search(
         Ok(s) => s,
         Err(response) => return response,
     };
-    let rows = match db::search(&mut db_scope, &term, q.folder, cursor, limit + 1).await {
+    let rows = match db::search(&mut db_scope, &term, q.folder, cursor, limit + 1, &excluded).await
+    {
         Ok(rows) => rows,
         Err(e) => return internal("search", e),
     };

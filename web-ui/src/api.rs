@@ -184,8 +184,17 @@ pub fn part_url(blake3: &str, index: usize) -> String {
 pub async fn search(
     query: &str,
     cursor: Option<String>,
+    // Which special folder kinds to search, comma-separated. Always sent, even
+    // when empty: the server's default for an ABSENT parameter is "sent only",
+    // and an empty string is a deliberate "none of them" that must not be
+    // mistaken for not having asked.
+    include: &str,
 ) -> Result<archive_api_types::SearchPage, Error> {
-    let mut url = format!("/api/search?q={}", encode(query));
+    let mut url = format!(
+        "/api/search?q={}&include={}",
+        encode(query),
+        encode(include)
+    );
     if let Some(c) = cursor {
         url.push_str(&format!("&cursor={}", encode(&c)));
     }

@@ -295,6 +295,37 @@ body {
   outline: 0; border-color: var(--accent);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent);
 }
+/* Folders-to-search picker. A <details>, so the browser owns opening, closing
+   and Escape; only the panel needs positioning. */
+.scope { position: relative; flex: none; }
+.scope summary {
+  display: grid; place-items: center; width: 1.9rem; height: 1.7rem;
+  border-radius: var(--r-sm); color: var(--muted); cursor: pointer;
+  list-style: none; transition: background var(--dur) ease, color var(--dur) ease;
+}
+.scope summary::-webkit-details-marker { display: none; }
+.scope summary:hover { background: var(--tint-hover); color: var(--fg); }
+.scope[open] summary { background: var(--tint-hover); color: var(--fg); }
+/* Something is being left out. Said on the closed control, because a filter you
+   cannot see is one you forget is on -- and then a search quietly misses. */
+.scope summary.narrowed { color: var(--accent); }
+.scope summary svg { width: 15px; height: 15px; display: block; }
+.scopemenu {
+  position: absolute; right: 0; top: calc(100% + .35rem); z-index: 5;
+  min-width: 10rem; padding: .5rem; display: flex; flex-direction: column; gap: .1rem;
+  background: var(--surface); border-radius: var(--r); box-shadow: var(--shadow);
+  border: 1px solid var(--line);
+}
+.scopemenu p { margin: 0 0 .25rem; padding: 0 .35rem; font-size: .75rem; }
+.scopemenu label {
+  display: flex; align-items: center; gap: .5rem;
+  padding: .3rem .35rem; border-radius: var(--r-sm);
+  cursor: pointer; user-select: none;
+  transition: background var(--dur) ease;
+}
+.scopemenu label:hover { background: var(--tint-hover); }
+.scopemenu input { accent-color: var(--accent); margin: 0; cursor: pointer; }
+
 /* The folder a hit came from, trailing the subject rather than taking a column
    of its own -- it is context, not a field worth aligning. */
 .list .infolder { color: var(--muted); font-size: .8rem; }

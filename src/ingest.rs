@@ -97,6 +97,41 @@ fn progress(line: &str) {
     let _ = std::io::stdout().flush();
 }
 
+/// One mailbox as the server listed it.
+///
+/// A struct rather than a tuple: this is the third thing LIST tells us about a
+/// folder, and `(String, bool, Option<&str>)` threaded through three functions
+/// is a bug waiting for someone to swap two of them.
+struct Mailbox {
+    name: String,
+    /// Gmail's All Mail: re-presents the whole account, so it is ingested by
+    /// identity rather than wholesale.
+    everything: bool,
+    /// trash, junk or sent, for search to exclude. See migration 0015.
+    special_use: Option<&'static str>,
+}
+
+/// What kind of folder this is, from the IMAP special-use attributes.
+///
+/// Authoritative and language-independent, which folder names are not: a French
+/// mailbox calls its bin "Corbeille" and still marks it `\Trash`. Migration 0015
+/// seeds these by name so search works before the first sweep; this then
+/// corrects them.
+///
+/// Only the three kinds search can exclude. Drafts and Archive carry attributes
+/// too and are deliberately ignored -- nothing reads them.
+fn special_use(item: &async_imap::types::Name) -> Option<&'static str> {
+    use async_imap::types::NameAttribute as Attribute;
+    item.attributes()
+        .iter()
+        .find_map(|attribute| match attribute {
+            Attribute::Trash => Some("trash"),
+            Attribute::Junk => Some("junk"),
+            Attribute::Sent => Some("sent"),
+            _ => None,
+        })
+}
+
 /// Names the attribute that makes a mailbox a VIEW rather than a folder.
 ///
 /// Gmail has no folders, only labels, and exposes some of them over IMAP as
@@ -667,7 +702,7 @@ pub async fn run_sweep(config: &Config, pool: &PgPool, address: &str, sweep: Swe
     let mut delimiter: Option<char> = None;
     // The flag marks Gmail's All Mail: a folder to be ingested by identity
     // rather than wholesale, because it re-presents the entire account.
-    let folders: Vec<(String, bool)> = {
+    let folders: Vec<Mailbox> = {
         let mut listing = session.list(Some(""), Some("*")).await?;
         let mut names = Vec::new();
         while let Some(item) = listing.next().await {
@@ -695,11 +730,14 @@ pub async fn run_sweep(config: &Config, pool: &PgPool, address: &str, sweep: Swe
             if delimiter.is_none() {
                 delimiter = item.delimiter().and_then(|d| d.chars().next());
             }
-            let everything = item
-                .attributes()
-                .iter()
-                .any(|a| matches!(a, async_imap::types::NameAttribute::All));
-            names.push((item.name().to_string(), everything));
+            names.push(Mailbox {
+                everything: item
+                    .attributes()
+                    .iter()
+                    .any(|a| matches!(a, async_imap::types::NameAttribute::All)),
+                special_use: special_use(&item),
+                name: item.name().to_string(),
+            });
         }
         names
     };
@@ -714,11 +752,11 @@ pub async fn run_sweep(config: &Config, pool: &PgPool, address: &str, sweep: Swe
     // A quick sweep looks only at INBOX. Compared case-insensitively
     // because IMAP defines that name as case-insensitive, and servers do use
     // other spellings of it.
-    let folders: Vec<(String, bool)> = match sweep {
+    let folders: Vec<Mailbox> = match sweep {
         Sweep::Everything => folders,
         Sweep::Inbox => folders
             .into_iter()
-            .filter(|(name, _)| name.eq_ignore_ascii_case("INBOX"))
+            .filter(|m| m.name.eq_ignore_ascii_case("INBOX"))
             .collect(),
     };
 
@@ -729,7 +767,8 @@ pub async fn run_sweep(config: &Config, pool: &PgPool, address: &str, sweep: Swe
     );
 
     let stored = AtomicUsize::new(0);
-    for (name, by_identity) in &folders {
+    for mailbox in &folders {
+        let (name, by_identity) = (&mailbox.name, mailbox.everything);
         // Retry at folder granularity, reconnecting in between. A dropped
         // connection mid-folder is the common failure on a multi-hour run, and
         // resume state means a retry continues from the last completed batch
@@ -744,7 +783,8 @@ pub async fn run_sweep(config: &Config, pool: &PgPool, address: &str, sweep: Swe
                 name,
                 config.ingest.concurrency,
                 &stored,
-                *by_identity,
+                by_identity,
+                mailbox.special_use,
             )
             .await
             {
@@ -813,6 +853,7 @@ async fn ingest_folder(
     // Gmail's All Mail: identify before downloading, because the folder is the
     // whole account over again and almost all of it is already held.
     by_identity: bool,
+    special_use: Option<&'static str>,
 ) -> Result<usize> {
     // EXAMINE, not SELECT: read-only on the source. Ingest must never mark the
     // user's live mail as read, or otherwise alter the mailbox it is copying.
@@ -840,7 +881,8 @@ async fn ingest_folder(
     let source_exists = mailbox.exists as i64;
     let folder = {
         let mut scope = db::Scope::begin(pool, account.user_id).await?;
-        let folder = db::folder_for_ingest(&mut scope, account.id, name, uid_validity).await?;
+        let folder =
+            db::folder_for_ingest(&mut scope, account.id, name, uid_validity, special_use).await?;
         scope.commit().await?;
         folder
     };

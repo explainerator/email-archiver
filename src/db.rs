@@ -627,11 +627,23 @@ pub async fn account_by_address(scope: &mut Scope<'_>, address: &str) -> Result<
 /// messages. Continuing from `last_source_uid` would silently skip mail, so the
 /// folder is rescanned from zero. Our own `uidnext` is untouched — the UIDs we
 /// serve to clients must never be reissued.
+/// The three folder kinds search can exclude.
+///
+/// Only these three. Drafts and Archive are just as identifiable from the same
+/// attributes and deliberately not recorded: nothing reads them, and a value no
+/// code consumes is one nobody maintains.
+pub const SPECIAL_USES: [&str; 3] = ["trash", "junk", "sent"];
+
 pub async fn folder_for_ingest(
     scope: &mut Scope<'_>,
     account_id: i64,
     name: &str,
     source_uidvalidity: i64,
+    // What the server says this folder IS: trash, junk, sent, or nothing in
+    // particular. Written on every sweep rather than only at creation, so a
+    // value seeded by name in migration 0015 is corrected by the authoritative
+    // attribute the first time ingest sees the folder again.
+    special_use: Option<&str>,
 ) -> Result<Folder> {
     let existing: Option<(i64, i64, Option<i64>, i64)> = sqlx::query_as(
         "SELECT id, uidnext, source_uidvalidity, last_source_uid
@@ -643,6 +655,12 @@ pub async fn folder_for_ingest(
     .await?;
 
     if let Some((id, uidnext, existing_validity, last_uid)) = existing {
+        sqlx::query("UPDATE folders SET special_use = $2 WHERE id = $1")
+            .bind(id)
+            .bind(special_use)
+            .execute(scope.conn())
+            .await?;
+
         if existing_validity != Some(source_uidvalidity) {
             eprintln!(
                 "  {name}: source UIDVALIDITY changed ({existing_validity:?} -> \
@@ -676,14 +694,15 @@ pub async fn folder_for_ingest(
         // user_id is SELECTed from the account rather than passed in. A caller
         // cannot supply the wrong one because a caller does not supply it at
         // all -- the value comes from the row it must agree with.
-        "INSERT INTO folders (account_id, name, uidvalidity, uidnext, source_uidvalidity, last_source_uid, user_id)
-         SELECT $1, $2, $3, 1, $4, 0, a.user_id FROM accounts a WHERE a.id = $1
+        "INSERT INTO folders (account_id, name, uidvalidity, uidnext, source_uidvalidity, last_source_uid, user_id, special_use)
+         SELECT $1, $2, $3, 1, $4, 0, a.user_id, $5 FROM accounts a WHERE a.id = $1
          RETURNING id",
     )
     .bind(account_id)
     .bind(name)
     .bind(uidvalidity)
     .bind(source_uidvalidity)
+    .bind(special_use)
     .fetch_one(scope.conn())
     .await
     .with_context(|| format!("creating folder {name}"))?;
@@ -1279,6 +1298,11 @@ pub async fn search(
     folder_id: Option<i64>,
     cursor: Option<(chrono::DateTime<chrono::Utc>, i64)>,
     limit: i64,
+    // Folder kinds to leave out: any of "trash", "junk", "sent". Empty searches
+    // everything. Applied here rather than after the fact because filtering a
+    // page that has already been cut to `limit` would return short pages and
+    // break the cursor, which walks (internaldate, uid) and cannot skip holes.
+    exclude: &[String],
 ) -> Result<Vec<SearchRow>> {
     let user_id = scope.user_id();
     // The caller supplies a substring, not a pattern: % and _ are wildcards in
@@ -1355,6 +1379,9 @@ pub async fn search(
           WHERE a.user_id = $1
             AND ($2::bigint IS NULL OR p.folder_id = $2)
             AND ($4::timestamptz IS NULL OR (m.internaldate, p.uid) < ($4, $5))
+            -- NULL is an ordinary folder and always searched; only a
+            -- classified folder can be excluded.
+            AND (f.special_use IS NULL OR NOT (f.special_use = ANY($7)))
           ORDER BY m.internaldate DESC, p.uid DESC
           LIMIT $6",
     )
@@ -1364,6 +1391,7 @@ pub async fn search(
     .bind(before_date)
     .bind(before_uid)
     .bind(limit)
+    .bind(exclude)
     .fetch_all(scope.conn())
     .await?;
 
