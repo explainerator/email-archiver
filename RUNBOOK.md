@@ -22,6 +22,9 @@ the same binary and the same database.
 
 The example is `ken@thebackroom420.ca` landing in `ken@twoducks.ca`'s archive.
 
+> For a mailbox belonging to a person who does not exist yet, follow
+> `NEW-USER.md` instead — it runs the two procedures in the right order.
+
 ### 1.1 Google side — once per domain, as the Workspace admin
 
 1. **Cloud console** → new project → enable the **Gmail API**.
@@ -119,6 +122,10 @@ in this state are flagged `[certs not verified]` in `email accounts` and `email 
 ---
 
 ## 3. Add a person
+
+> **Adding a person AND their first mailbox in one go?** `NEW-USER.md` is that
+> whole procedure written out in order, including the deploy this section does
+> not cover. This section is the reference for the user-creation half on its own.
 
 New users need a bucket, which is Terraform's job.
 
