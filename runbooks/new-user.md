@@ -2,9 +2,8 @@
 
 Start to finish, in order. Every step, no branching except where marked.
 
-Operational reference for individual tasks is `RUNBOOK.md`; this is the one
-procedure that spans several of its sections, so it is written out in full
-rather than as pointers.
+The other files here each cover one task. This one spans several of them, so it
+is written out in full rather than as a trail of pointers.
 
 **Example throughout:** adding *Sam Chen* (`sam@twoducks.ca`), archiving their
 Google Workspace mailbox `sam@thebackroom420.ca`.
@@ -248,4 +247,4 @@ Then have Sam sign in at `https://archive.thebackroom420.ca` with
 | Mail arrives but never updates | Account never followed | Step 6 |
 
 The archive is read-only after import, so none of the above risks the mail
-itself. `RUNBOOK.md` section 7 covers the rest.
+itself. [troubleshooting.md](troubleshooting.md) covers the rest.
