@@ -78,6 +78,12 @@ email ingest ken@thebackroom420.ca
 
 Resumable — re-running continues where it stopped, so an interruption costs nothing.
 
+Then start keeping it current:
+
+```
+email follow ken@thebackroom420.ca on
+```
+
 ### 1.5 Confirm
 
 ```
@@ -93,6 +99,7 @@ email check ken@twoducks.ca         # Postgres and S3 agree
 email add-account ken@twoducks.ca info@kenduck.ca kenduck imap
 email set-source info@kenduck.ca mail.kenduck.ca info@kenduck.ca
 email ingest info@kenduck.ca
+email follow info@kenduck.ca on
 ```
 
 `set-source` prompts for the password without echoing. **Never pass it as an argument** —
@@ -189,9 +196,20 @@ Automatic. The IMAP service sweeps **INBOX every 10 minutes** and **every folder
 every 30**, from inside the process it already runs -- no cron entry, no timer, no
 second copy of the binary scheduled from outside.
 
-Only accounts with the **follow** flag are swept, and every account is followed
-from the moment it is registered. So a newly added mailbox starts keeping itself
-current with no further step.
+Only accounts with the **follow** flag are swept, and a newly registered account
+does **not** have it. That is deliberate: its first sweep would not be a catch-up
+of a few seconds but a full import of the whole mailbox, and because the sweep is
+sequential every other account would wait hours behind it.
+
+So the last step of adding any account is to start following it:
+
+```
+email ingest new@example.com      # the first import, by hand
+email follow new@example.com on   # now its sweeps are the cheap kind
+```
+
+`email accounts <user>` marks anything unfollowed, which is how you catch one
+that was imported and then forgotten.
 
 When a source is shut down -- a lapsed domain, a closed account -- stop reaching
 for it:

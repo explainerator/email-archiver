@@ -286,6 +286,40 @@ async fn admin_surface(pool: &sqlx::PgPool, user_id: i64, folder_id: i64) -> any
         "insecure-tls could not be turned back off"
     );
 
+    // follow. A freshly created account must NOT be followed: its first sweep
+    // would be a full import, and the sweep is sequential, so every other
+    // account would queue behind it for hours. The default lives in migration
+    // 0014 rather than in any INSERT, which is exactly why it is worth an
+    // assertion -- nothing in the Rust would look wrong if it flipped back.
+    let listed = db::accounts_for_user(pool, user_id).await?;
+    anyhow::ensure!(
+        listed.iter().any(|a| a.0 == TEST_ADDRESS && !a.6),
+        "a newly created account was followed; a first import would block the sweep"
+    );
+
+    db::set_follow(pool, TEST_ADDRESS, true).await?;
+    let listed = db::accounts_for_user(pool, user_id).await?;
+    anyhow::ensure!(
+        listed.iter().any(|a| a.0 == TEST_ADDRESS && a.6),
+        "follow on did not take effect"
+    );
+    anyhow::ensure!(
+        db::followed_accounts(pool)
+            .await?
+            .iter()
+            .any(|a| a == TEST_ADDRESS),
+        "a followed account did not appear in the refresh sweep"
+    );
+
+    db::set_follow(pool, TEST_ADDRESS, false).await?;
+    anyhow::ensure!(
+        !db::followed_accounts(pool)
+            .await?
+            .iter()
+            .any(|a| a == TEST_ADDRESS),
+        "an unfollowed account was still swept"
+    );
+
     // The listings, which are how a person notices any of the above.
     let users = db::all_users(pool).await?;
     anyhow::ensure!(

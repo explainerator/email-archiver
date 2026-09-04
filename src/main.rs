@@ -132,10 +132,15 @@ USAGE:
         schedule from inside the running service.
 
     email-archiver follow <address> <on|off>
-        Whether `refresh` keeps checking this mailbox. On by default when an
-        account is registered. Turn it off once a source is shut down: nothing
-        is deleted and the archive of it is untouched, only the reaching out
-        stops.
+        Whether the scheduler and `refresh` keep checking this mailbox.
+
+        OFF for a newly registered account, because its first sweep would be a
+        full import of the whole mailbox and the sweep is sequential -- every
+        other account would wait hours behind it. Import by hand, then turn
+        this on.
+
+        Turn it off again once a source is shut down: nothing is deleted and
+        the archive of it is untouched, only the reaching out stops.
 
 Configuration is read from $EMAIL_ARCHIVER_CONFIG, else /etc/email-archiver/config.toml.
 Generate it with: cd terraform && terraform output -raw archiver_config > config.toml
@@ -226,6 +231,12 @@ async fn main() -> Result<()> {
             let pool = connect_db(&config).await?;
             let id = db::create_account(&pool, &login, &address, &label, &provider).await?;
             println!("account {address} (id {id}) -> user {login}, namespace {label}/");
+            // Said plainly, because "registered" and "being kept current" are
+            // now two different things and the gap between them is a command
+            // nobody would guess at.
+            println!("  not followed yet. Import it first, then start following:");
+            println!("    email ingest {address}");
+            println!("    email follow {address} on");
             Ok(())
         }
 
