@@ -27,6 +27,7 @@ use chrono::Utc;
 use futures::stream::{self, StreamExt};
 use sqlx::PgPool;
 use std::io::Write;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::TcpStream;
@@ -348,7 +349,7 @@ pub async fn run(config: &Config, pool: &PgPool, address: &str) -> Result<()> {
     // column exists. Generic IMAP uses stored credentials; Google Workspace
     // mints a short-lived token from the service account instead, so those
     // accounts have no host or password recorded at all.
-    let source = source_for_address(config, pool, address).await?;
+    let mut source = source_for_address(config, pool, address).await?;
     // Arc so every concurrent task shares one S3 client and its connection pool.
     let store = Arc::new(Store::open(config, &account.bucket).await?);
 
@@ -396,7 +397,7 @@ pub async fn run(config: &Config, pool: &PgPool, address: &str) -> Result<()> {
         config.ingest.concurrency
     );
 
-    let mut total = 0usize;
+    let stored = AtomicUsize::new(0);
     for name in &folders {
         // Retry at folder granularity, reconnecting in between. A dropped
         // connection mid-folder is the common failure on a multi-hour run, and
@@ -411,27 +412,41 @@ pub async fn run(config: &Config, pool: &PgPool, address: &str) -> Result<()> {
                 &account,
                 name,
                 config.ingest.concurrency,
+                &stored,
             )
             .await
             {
-                Ok(n) => {
-                    total += n;
-                    break;
-                }
+                Ok(_) => break,
                 Err(e) if attempt < MAX_ATTEMPTS => {
                     let delay = BACKOFF_BASE * 2u32.pow(attempt - 1);
+                    // {e:#} for the whole chain. The bare {e} printed only
+                    // the outermost context, which hid the server's own words --
+                    // exactly what is needed when a source starts refusing us.
                     eprintln!(
-                        "  {name}: failed ({e}); reconnecting and retrying in {}s                          (attempt {attempt}/{MAX_ATTEMPTS})",
+                        "  {name}: failed ({e:#}); reconnecting and retrying in {}s (attempt {attempt}/{MAX_ATTEMPTS})",
                         delay.as_secs()
                     );
                     tokio::time::sleep(delay).await;
+
+                    // Re-resolve the source instead of reusing it. A Google
+                    // access token is minted once, up front, and lives an hour;
+                    // any import long enough to need a reconnect is long enough
+                    // to have outlived it, so every late reconnect failed to
+                    // authenticate with a stale token -- while blaming
+                    // domain-wide delegation, which was never the problem.
+                    match source_for_address(config, pool, address).await {
+                        Ok(fresh) => source = fresh,
+                        Err(refresh_err) => {
+                            eprintln!("  could not refresh credentials: {refresh_err:#}");
+                        }
+                    }
 
                     // The old session is probably dead; a fresh one is cheaper
                     // than guessing which parts of it still work.
                     session = match connect(&source).await {
                         Ok(s) => s,
                         Err(reconnect_err) => {
-                            eprintln!("  reconnect failed: {reconnect_err}");
+                            eprintln!("  reconnect failed: {reconnect_err:#}");
                             attempt += 1;
                             continue;
                         }
@@ -444,7 +459,10 @@ pub async fn run(config: &Config, pool: &PgPool, address: &str) -> Result<()> {
     }
 
     session.logout().await.ok();
-    println!("ingest complete: {total} new messages");
+    println!(
+        "ingest complete: {} new messages",
+        stored.load(Ordering::Relaxed)
+    );
     Ok(())
 }
 
@@ -455,18 +473,35 @@ async fn ingest_folder(
     account: &db::Account,
     name: &str,
     concurrency: usize,
+    // Bumped as each message lands, so the run's total survives a folder that
+    // fails partway. The old count came from this function's return value and
+    // was therefore lost entirely when it returned Err -- a run that stored
+    // 17,541 messages and then dropped its connection reported zero.
+    stored: &AtomicUsize,
 ) -> Result<usize> {
     // EXAMINE, not SELECT: read-only on the source. Ingest must never mark the
     // user's live mail as read, or otherwise alter the mailbox it is copying.
-    let mailbox = match session.examine(name).await {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!("  {name}: cannot examine ({e}); skipping");
-            return Ok(0);
-        }
-    };
+    // This used to log and return Ok(0), which was wrong in the worst way: a
+    // dead connection makes EVERY remaining folder unexaminable, so a run that
+    // had actually collapsed reported "complete", counted zero new messages,
+    // and exited 0. A folder that cannot be read is a failure. Returning Err
+    // sends it to the retry loop, which reconnects -- and if it still cannot be
+    // read, the run fails loudly instead of quietly claiming success.
+    let mailbox = session
+        .examine(name)
+        .await
+        .with_context(|| format!("examining {name}"))?;
 
-    let uid_validity = mailbox.uid_validity.unwrap_or(0) as i64;
+    // UIDVALIDITY absent used to become 0, and 0 compares unequal to whatever
+    // is on record, so the folder looked like it had been recreated and its
+    // resume point was reset to zero -- discarding the record of a partially
+    // completed folder on the strength of a value the server never sent.
+    // RFC 3501 requires UIDVALIDITY in an EXAMINE response. Absent means
+    // something is wrong, and the safe reading of "something is wrong" is to
+    // stop, not to assume the mailbox is new.
+    let uid_validity = mailbox.uid_validity.with_context(|| {
+        format!("{name}: the server did not send UIDVALIDITY, so resume state cannot be trusted")
+    })? as i64;
     let source_exists = mailbox.exists as i64;
     let folder = {
         let mut scope = db::Scope::begin(pool, account.user_id).await?;
@@ -572,6 +607,7 @@ async fn ingest_folder(
         while let Some(outcome) = outcomes.next().await {
             if outcome? {
                 new_messages += 1;
+                stored.fetch_add(1, Ordering::Relaxed);
             }
             done += 1;
             if last_tick.elapsed() >= PROGRESS_EVERY && done < fetched_len {
