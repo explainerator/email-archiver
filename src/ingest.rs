@@ -535,6 +535,36 @@ async fn ingest_folder(
         search
     };
 
+    // Drop UIDs we already hold, BEFORE fetching any bodies.
+    //
+    // The watermark filter above is not enough on its own. It is one mutable
+    // number, and when it goes backwards -- a real UIDVALIDITY change, or the
+    // unwrap_or(0) bug that used to invent one -- every message in the folder
+    // looks new again. Content-hashed dedup then discards the duplicates, but
+    // only after paying to download them, which is the expensive half.
+    //
+    // Gmail caps IMAP downloads near 2.5 GB/day and locks the mailbox for a day
+    // once that is passed, so a needless re-fetch of a large folder is not just
+    // slow, it can cost access to the source entirely.
+    let uids = {
+        let mut scope = db::Scope::begin(pool, account.user_id).await?;
+        let held = db::archived_source_uids(&mut scope, folder.id).await?;
+        scope.commit().await?;
+
+        let before = uids.len();
+        let remaining: Vec<u32> = uids
+            .into_iter()
+            .filter(|uid| !held.contains(&(*uid as i64)))
+            .collect();
+        let skipped = before - remaining.len();
+        if skipped > 0 {
+            progress(&format!(
+                "  {name}: {skipped} already archived, not re-downloading"
+            ));
+        }
+        remaining
+    };
+
     // No early return when there is nothing to fetch: chunks() over an empty
     // slice yields no batches anyway, and returning here would skip the
     // completeness check below — which is precisely the check you want on a

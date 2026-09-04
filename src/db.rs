@@ -846,6 +846,34 @@ pub async fn count_placements(scope: &mut Scope<'_>, folder_id: i64) -> Result<i
     )
 }
 
+/// The source UIDs already archived in this folder.
+///
+/// Resume used to rest entirely on `folders.last_source_uid`, a single mutable
+/// number. That is fragile in a way that costs real money: when it was reset --
+/// by a bug, or legitimately by a genuine UIDVALIDITY change -- ingest re-FETCHed
+/// every message body from the source, because deduplication is content-hashed
+/// and cannot run until the bytes have already been downloaded. Re-reading
+/// 23,000 messages to discover we held 17,541 of them is not free against
+/// Gmail, which caps IMAP downloads at roughly 2.5 GB/day and locks the mailbox
+/// for a day when the cap is passed.
+///
+/// We have recorded `placements.source_uid` since migration 0002, so the set of
+/// what we hold is already on disk and needs no guessing about gaps. Reading it
+/// makes a rescan cost one SEARCH and a set difference rather than a full
+/// re-download.
+pub async fn archived_source_uids(
+    scope: &mut Scope<'_>,
+    folder_id: i64,
+) -> Result<std::collections::HashSet<i64>> {
+    let rows: Vec<i64> = sqlx::query_scalar(
+        "SELECT source_uid FROM placements WHERE folder_id = $1 AND source_uid IS NOT NULL",
+    )
+    .bind(folder_id)
+    .fetch_all(scope.conn())
+    .await?;
+    Ok(rows.into_iter().collect())
+}
+
 /// Messages for a user with no cached header block yet.
 pub async fn messages_missing_headers(scope: &mut Scope<'_>) -> Result<Vec<String>> {
     let user_id = scope.user_id();
