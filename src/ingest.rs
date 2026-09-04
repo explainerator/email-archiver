@@ -517,7 +517,7 @@ pub async fn source_for_address(
 /// So failures are collected and reported together, and the process still exits
 /// non-zero if any occurred: a scheduled sweep that swallowed its errors would
 /// be worse than no sweep, because it would look like the archive was current.
-pub async fn refresh(config: &Config, pool: &PgPool) -> Result<()> {
+pub async fn refresh(config: &Config, pool: &PgPool, sweep: Sweep) -> Result<()> {
     let addresses = db::followed_accounts(pool).await?;
 
     if addresses.is_empty() {
@@ -528,12 +528,16 @@ pub async fn refresh(config: &Config, pool: &PgPool) -> Result<()> {
         return Ok(());
     }
 
-    println!("refreshing {} account(s)", addresses.len());
+    println!(
+        "refreshing {} account(s), {}",
+        addresses.len(),
+        sweep.describes()
+    );
 
     let mut failed: Vec<(String, String)> = Vec::new();
     for address in &addresses {
         println!();
-        if let Err(e) = run(config, pool, address).await {
+        if let Err(e) = run_sweep(config, pool, address, sweep).await {
             // {e:#} for the whole chain: on an unattended run this line is the
             // only account of what went wrong.
             eprintln!("{address}: FAILED -- {e:#}");
@@ -562,7 +566,83 @@ pub async fn refresh(config: &Config, pool: &PgPool) -> Result<()> {
     Ok(())
 }
 
+/// How much of each mailbox a sweep looks at.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Sweep {
+    /// INBOX only. Nearly all new mail arrives there, and checking one folder
+    /// per account is cheap enough to run often.
+    Inbox,
+    /// Every folder. Catches Sent, labels, and anything filtered past the
+    /// inbox, none of which is urgent but all of which must be caught.
+    Everything,
+}
+
+impl Sweep {
+    fn describes(self) -> &'static str {
+        match self {
+            Sweep::Inbox => "INBOX",
+            Sweep::Everything => "all folders",
+        }
+    }
+}
+
+/// How often the quick sweep runs.
+const TICK: Duration = Duration::from_secs(10 * 60);
+/// Every third tick is a full sweep, so half-hourly.
+const FULL_EVERY: u64 = 3;
+
+/// Keep the archive current from inside the running service.
+///
+/// In-process rather than a cron entry or a systemd timer, because a machine
+/// that already runs this binary continuously does not need a second copy of it
+/// scheduled from outside, with its own config path and its own way to fail.
+///
+/// One loop, sleeping AFTER each sweep rather than on a fixed wall-clock
+/// schedule. That is what makes overlap impossible: a sweep that runs long
+/// simply delays the next one instead of having a second sweep start on top of
+/// it, both walking the same mailboxes. It also means the two cadences can
+/// never collide, because they are the same loop counting ticks.
+///
+/// The first sweep is one full tick away, not immediate. Restarts and deploys
+/// would otherwise each kick off a sweep, and a few restarts in a row would
+/// mean several in quick succession against the same sources.
+///
+/// Nothing in here may return. An error ends one sweep and is logged; the loop
+/// continues, because a scheduler that exits on the first unreachable mailbox
+/// stops keeping the archive current and says nothing further about it.
+pub async fn scheduler(config: Arc<Config>, pool: PgPool) {
+    println!(
+        "refresh scheduler: INBOX every {}m, all folders every {}m",
+        TICK.as_secs() / 60,
+        TICK.as_secs() * FULL_EVERY / 60
+    );
+
+    let mut tick: u64 = 0;
+    loop {
+        tokio::time::sleep(TICK).await;
+        tick += 1;
+
+        let sweep = if tick % FULL_EVERY == 0 {
+            Sweep::Everything
+        } else {
+            Sweep::Inbox
+        };
+
+        println!("refresh: sweeping {}", sweep.describes());
+        if let Err(e) = refresh(&config, &pool, sweep).await {
+            // Logged, never propagated. {e:#} for the whole chain: on an
+            // unattended service this line is the only account of what failed.
+            eprintln!("refresh: {e:#}");
+        }
+    }
+}
+
+/// Pull everything from one mailbox.
 pub async fn run(config: &Config, pool: &PgPool, address: &str) -> Result<()> {
+    run_sweep(config, pool, address, Sweep::Everything).await
+}
+
+pub async fn run_sweep(config: &Config, pool: &PgPool, address: &str, sweep: Sweep) -> Result<()> {
     // accounts is policy-covered, so the owner has to be resolved first --
     // through `users`, which is not. See db::owner_of_address.
     let owner = db::owner_of_address(pool, address).await?;
@@ -631,8 +711,19 @@ pub async fn run(config: &Config, pool: &PgPool, address: &str) -> Result<()> {
     }
     println!("  source hierarchy delimiter: {delimiter:?}");
 
+    // A quick sweep looks only at INBOX. Compared case-insensitively
+    // because IMAP defines that name as case-insensitive, and servers do use
+    // other spellings of it.
+    let folders: Vec<(String, bool)> = match sweep {
+        Sweep::Everything => folders,
+        Sweep::Inbox => folders
+            .into_iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case("INBOX"))
+            .collect(),
+    };
+
     println!(
-        "  {} selectable folders, concurrency {}",
+        "  {} folder(s) to sweep, concurrency {}",
         folders.len(),
         config.ingest.concurrency
     );

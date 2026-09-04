@@ -183,6 +183,47 @@ Look for the `archive` rows: both units `Running`, `imaps 993 open`, `https 443 
 
 ---
 
+## 4a. Keeping the archive current
+
+Automatic. The IMAP service sweeps **INBOX every 10 minutes** and **every folder
+every 30**, from inside the process it already runs -- no cron entry, no timer, no
+second copy of the binary scheduled from outside.
+
+Only accounts with the **follow** flag are swept, and every account is followed
+from the moment it is registered. So a newly added mailbox starts keeping itself
+current with no further step.
+
+When a source is shut down -- a lapsed domain, a closed account -- stop reaching
+for it:
+
+```
+email follow old@example.com off
+```
+
+Nothing is deleted. Every message, folder and credential stays exactly as it is;
+only the checking for new mail stops, and `email accounts` marks the account
+`[not followed]`. Reversible with `on`.
+
+To sweep immediately rather than waiting for the next tick:
+
+```
+email refresh
+```
+
+That does every folder of every followed account and reports which, if any,
+failed. One account failing never stops the others.
+
+**Where it runs.** The scheduler is enabled on the IMAP unit only, by
+`serve --refresh` in the unit file. Both units run the same binary against the
+same archive, so enabling it on the web unit as well would sweep every mailbox
+twice. Watch it with:
+
+```
+ssh ubuntu@<instance> 'journalctl -u email-archiver -f'
+```
+
+---
+
 ## 5. Routine checks
 
 ```

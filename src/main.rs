@@ -126,9 +126,10 @@ USAGE:
         from where it stopped.
 
     email-archiver refresh
-        Pull new mail for every followed account in turn. This is the command
-        to run on a schedule. One account failing does not stop the others,
-        and the exit status reports whether any did.
+        Pull new mail for every followed account in turn, every folder. One
+        account failing does not stop the others, and the exit status reports
+        whether any did. Not normally needed: `serve --refresh` does this on a
+        schedule from inside the running service.
 
     email-archiver follow <address> <on|off>
         Whether `refresh` keeps checking this mailbox. On by default when an
@@ -448,7 +449,20 @@ async fn main() -> Result<()> {
                 .unwrap_or_else(|| "127.0.0.1:1143".to_string());
             let allow_plaintext = args.iter().any(|a| a == "--allow-plaintext");
             let pool = connect_db(&config).await?;
-            server::run(&std::sync::Arc::new(config), &pool, &bind, allow_plaintext).await
+            let config = std::sync::Arc::new(config);
+
+            // The scheduler lives in exactly ONE of the two units. Both serve
+            // the same archive from the same binary, so enabling it in each
+            // would sweep every mailbox twice over.
+            if args.iter().any(|a| a == "--refresh") {
+                let scheduled = std::sync::Arc::clone(&config);
+                let scheduled_pool = pool.clone();
+                tokio::spawn(async move {
+                    ingest::scheduler(scheduled, scheduled_pool).await;
+                });
+            }
+
+            server::run(&config, &pool, &bind, allow_plaintext).await
         }
 
         Some("serve-web") => {
@@ -517,7 +531,10 @@ async fn main() -> Result<()> {
 
         Some("refresh") => {
             let pool = connect_db(&config).await?;
-            ingest::refresh(&config, &pool).await
+            // A manual refresh sweeps everything: someone who typed the command
+            // is waiting for a complete answer, not the cheap one the scheduler
+            // runs between its full passes.
+            ingest::refresh(&config, &pool, ingest::Sweep::Everything).await
         }
 
         Some("ingest") => {
