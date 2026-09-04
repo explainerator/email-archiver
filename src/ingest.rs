@@ -102,7 +102,6 @@ fn progress(line: &str) {
 /// Gmail has no folders, only labels, and exposes some of them over IMAP as
 /// mailboxes that re-present mail filed elsewhere:
 ///
-/// - `\All` — `[Gmail]/All Mail`, every message in the account
 /// - `\Flagged` — `[Gmail]/Starred`, a subset picked out of the same pile
 /// - `\Important` — the same again, chosen by Google rather than by the user
 ///
@@ -120,16 +119,16 @@ fn progress(line: &str) {
 /// NOT skipped: Sent, Drafts, Spam and Trash. Each holds mail that is genuinely
 /// its own, and Spam and Trash do not appear under `\All` at all.
 ///
-/// What this leaves out is mail ARCHIVED in Gmail -- taken out of the inbox
-/// without being labelled -- which exists only under `\All`. Collecting it
-/// without re-downloading everything means fetching Message-IDs from All Mail,
-/// which is cheap, and bodies only for those not already held.
+/// Nor is `\All` skipped, though it was at first. It is the only place mail
+/// archived out of the inbox without a label exists, so dropping it lost that
+/// mail entirely. It is instead ingested through `without_already_archived`,
+/// which identifies its contents by ENVELOPE and downloads only what this
+/// account does not already hold.
 fn overlapping_view(item: &async_imap::types::Name) -> Option<&'static str> {
     use async_imap::types::NameAttribute as Attribute;
     item.attributes()
         .iter()
         .find_map(|attribute| match attribute {
-            Attribute::All => Some(r"\All"),
             Attribute::Flagged => Some(r"\Flagged"),
             // \Important is Gmail's own, so it arrives unrecognised. The
             // leading backslash is trimmed because whether it survives parsing
@@ -144,6 +143,127 @@ fn overlapping_view(item: &async_imap::types::Name) -> Option<&'static str> {
             }
             _ => None,
         })
+}
+
+/// Envelopes are a few hundred bytes each, so they are fetched in much
+/// larger batches than bodies without straining anything.
+const ENVELOPE_BATCH: usize = 500;
+
+/// One spelling of a Message-ID, so the two sides can be compared.
+///
+/// They do not agree by default. `mail-parser` strips the angle brackets when
+/// we archive a message, while IMAP's ENVELOPE reports the field as written,
+/// brackets and all -- so `<a@b>` from the server would never match the `a@b`
+/// on record. Unnormalised, nothing matches, every message looks unheld, and
+/// the whole point of asking for envelopes is quietly lost while appearing to
+/// work. Both sides go through this.
+fn normalise_message_id(raw: &str) -> String {
+    raw.trim()
+        .trim_start_matches('<')
+        .trim_end_matches('>')
+        .trim()
+        .to_string()
+}
+
+/// Drop the UIDs whose message this account already holds in another folder.
+///
+/// For Gmail's All Mail, which is not a folder but every message in the
+/// account. Ingesting it naively re-downloads the whole mailbox to discover
+/// that content hashing already had it. Asking the server for ENVELOPEs first
+/// costs a few hundred bytes a message instead of the message, and leaves only
+/// the genuinely unheld ones to fetch -- in practice the mail archived out of
+/// the inbox without a label, which lives nowhere else and would otherwise be
+/// the one thing skipping All Mail loses.
+///
+/// ENVELOPE rather than BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)] because the
+/// server parses it for us and the whole header block is an order of magnitude
+/// larger than the one field wanted from it.
+///
+/// Every uncertainty resolves towards fetching. A UID the server returns no
+/// envelope for, or one carrying no Message-ID, is kept and downloaded, and
+/// content hashing sorts it out afterwards.
+async fn without_already_archived(
+    pool: &PgPool,
+    session: &mut Session,
+    account: &db::Account,
+    name: &str,
+    uids: Vec<u32>,
+) -> Result<Vec<u32>> {
+    if uids.is_empty() {
+        return Ok(uids);
+    }
+
+    let known = {
+        let mut scope = db::Scope::begin(pool, account.user_id).await?;
+        let known = db::archived_message_ids(&mut scope, account.id).await?;
+        scope.commit().await?;
+        known
+            .iter()
+            .map(|id| normalise_message_id(id))
+            .collect::<std::collections::HashSet<_>>()
+    };
+
+    progress(&format!(
+        "  {name}: {} to identify against {} already archived",
+        uids.len(),
+        known.len()
+    ));
+
+    let mut keep = Vec::new();
+    let mut held = 0usize;
+
+    for chunk in uids.chunks(ENVELOPE_BATCH) {
+        let set = chunk
+            .iter()
+            .map(|uid| uid.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+
+        let envelopes: Vec<(u32, Option<String>)> = {
+            let mut stream = session
+                .uid_fetch(&set, "(UID ENVELOPE)")
+                .await
+                .with_context(|| format!("fetching envelopes from {name}"))?;
+
+            let mut out = Vec::new();
+            while let Some(item) = stream.next().await {
+                let item = item?;
+                let Some(uid) = item.uid else { continue };
+                let message_id = item
+                    .envelope()
+                    .and_then(|envelope| envelope.message_id.as_ref())
+                    .map(|id| normalise_message_id(&String::from_utf8_lossy(id)))
+                    .filter(|id| !id.is_empty());
+                out.push((uid, message_id));
+            }
+            out
+        };
+
+        let answered: std::collections::HashSet<u32> =
+            envelopes.iter().map(|(uid, _)| *uid).collect();
+
+        for (uid, message_id) in envelopes {
+            match message_id {
+                Some(id) if known.contains(&id) => held += 1,
+                _ => keep.push(uid),
+            }
+        }
+        // A UID the server said nothing about is not evidence that we hold it.
+        keep.extend(chunk.iter().copied().filter(|uid| !answered.contains(uid)));
+
+        progress(&format!(
+            "    {name}: identified {}/{}, {held} already held",
+            keep.len() + held,
+            uids.len()
+        ));
+    }
+
+    keep.sort_unstable();
+    println!(
+        "  {name}: {held} already archived elsewhere, {} to fetch",
+        keep.len()
+    );
+    Ok(keep)
 }
 
 pub type Session = async_imap::Session<tokio_rustls::client::TlsStream<TcpStream>>;
@@ -409,7 +529,9 @@ pub async fn run(config: &Config, pool: &PgPool, address: &str) -> Result<()> {
     // Collect names first: the session cannot be used for anything else while
     // the LIST stream is borrowed from it.
     let mut delimiter: Option<char> = None;
-    let folders: Vec<String> = {
+    // The flag marks Gmail's All Mail: a folder to be ingested by identity
+    // rather than wholesale, because it re-presents the entire account.
+    let folders: Vec<(String, bool)> = {
         let mut listing = session.list(Some(""), Some("*")).await?;
         let mut names = Vec::new();
         while let Some(item) = listing.next().await {
@@ -437,7 +559,11 @@ pub async fn run(config: &Config, pool: &PgPool, address: &str) -> Result<()> {
             if delimiter.is_none() {
                 delimiter = item.delimiter().and_then(|d| d.chars().next());
             }
-            names.push(item.name().to_string());
+            let everything = item
+                .attributes()
+                .iter()
+                .any(|a| matches!(a, async_imap::types::NameAttribute::All));
+            names.push((item.name().to_string(), everything));
         }
         names
     };
@@ -456,7 +582,7 @@ pub async fn run(config: &Config, pool: &PgPool, address: &str) -> Result<()> {
     );
 
     let stored = AtomicUsize::new(0);
-    for name in &folders {
+    for (name, by_identity) in &folders {
         // Retry at folder granularity, reconnecting in between. A dropped
         // connection mid-folder is the common failure on a multi-hour run, and
         // resume state means a retry continues from the last completed batch
@@ -471,6 +597,7 @@ pub async fn run(config: &Config, pool: &PgPool, address: &str) -> Result<()> {
                 name,
                 config.ingest.concurrency,
                 &stored,
+                *by_identity,
             )
             .await
             {
@@ -536,6 +663,9 @@ async fn ingest_folder(
     // was therefore lost entirely when it returned Err -- a run that stored
     // 17,541 messages and then dropped its connection reported zero.
     stored: &AtomicUsize,
+    // Gmail's All Mail: identify before downloading, because the folder is the
+    // whole account over again and almost all of it is already held.
+    by_identity: bool,
 ) -> Result<usize> {
     // EXAMINE, not SELECT: read-only on the source. Ingest must never mark the
     // user's live mail as read, or otherwise alter the mailbox it is copying.
@@ -622,6 +752,12 @@ async fn ingest_folder(
             ));
         }
         remaining
+    };
+
+    let uids = if by_identity {
+        without_already_archived(pool, session, account, name, uids).await?
+    } else {
+        uids
     };
 
     // No early return when there is nothing to fetch: chunks() over an empty
@@ -834,4 +970,32 @@ async fn store_message(
         .await?;
 
     Ok(is_new)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn message_ids_compare_across_the_bracket_difference() {
+        // What IMAP reports, and what we archived, for the same message.
+        assert_eq!(
+            normalise_message_id("<CAF=abc123@mail.gmail.com>"),
+            normalise_message_id("CAF=abc123@mail.gmail.com")
+        );
+    }
+
+    #[test]
+    fn message_ids_tolerate_whitespace_and_absence() {
+        assert_eq!(normalise_message_id("  <a@b>  "), "a@b");
+        assert_eq!(normalise_message_id("< a@b >"), "a@b");
+        assert_eq!(normalise_message_id(""), "");
+        // Not a bracket pair, and not this function's business to repair.
+        assert_eq!(normalise_message_id("a@b>"), "a@b");
+    }
+
+    #[test]
+    fn distinct_ids_stay_distinct() {
+        assert_ne!(normalise_message_id("<a@b>"), normalise_message_id("<a@c>"));
+    }
 }

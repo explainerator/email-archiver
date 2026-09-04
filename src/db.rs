@@ -846,6 +846,39 @@ pub async fn count_placements(scope: &mut Scope<'_>, folder_id: i64) -> Result<i
     )
 }
 
+/// Every Message-ID this account has already archived, in any of its folders.
+///
+/// Used to ingest Gmail's All Mail without re-downloading the account. All Mail
+/// re-presents every message that is also in INBOX, Sent or a label, and the
+/// only way to tell which is which is to ask the source for an identity cheaper
+/// than the body -- our own identity is a hash OF the body, so it cannot answer
+/// a question asked before downloading.
+///
+/// Message-ID is that identity. It is sender-supplied and so weaker than the
+/// content hash we archive under, but it is only ever used here to decide
+/// whether a download can be SKIPPED; anything actually downloaded is still
+/// deduplicated on content. A missing or unrecognised Message-ID therefore
+/// costs a needless download, never a lost message.
+///
+/// Scoped to the account rather than the user: two source mailboxes are two
+/// archives, and a message in one is not a reason to skip it in the other.
+pub async fn archived_message_ids(
+    scope: &mut Scope<'_>,
+    account_id: i64,
+) -> Result<std::collections::HashSet<String>> {
+    let rows: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT m.envelope->>'message_id'
+         FROM messages m
+         JOIN placements p ON p.message_id = m.id
+         JOIN folders f ON f.id = p.folder_id
+         WHERE f.account_id = $1 AND m.envelope->>'message_id' IS NOT NULL",
+    )
+    .bind(account_id)
+    .fetch_all(scope.conn())
+    .await?;
+    Ok(rows.into_iter().collect())
+}
+
 /// The source UIDs already archived in this folder.
 ///
 /// Resume used to rest entirely on `folders.last_source_uid`, a single mutable
