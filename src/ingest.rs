@@ -97,6 +97,55 @@ fn progress(line: &str) {
     let _ = std::io::stdout().flush();
 }
 
+/// Names the attribute that makes a mailbox a VIEW rather than a folder.
+///
+/// Gmail has no folders, only labels, and exposes some of them over IMAP as
+/// mailboxes that re-present mail filed elsewhere:
+///
+/// - `\All` — `[Gmail]/All Mail`, every message in the account
+/// - `\Flagged` — `[Gmail]/Starred`, a subset picked out of the same pile
+/// - `\Important` — the same again, chosen by Google rather than by the user
+///
+/// Ingesting those archives the whole mailbox a second, third and fourth time.
+/// Bodies deduplicate on content so S3 does not grow, but a placement is still
+/// written per folder -- every message then appears several times in the
+/// archive -- and each body is re-downloaded in full only to discover it was
+/// already held. On a 23,000-message account that is most of a day's Gmail
+/// bandwidth allowance spent to add nothing.
+///
+/// Matched on the IMAP special-use attribute rather than the name, so it holds
+/// whatever language the account is in: a German mailbox calls this folder
+/// "[Gmail]/Alle Nachrichten" and still marks it `\All`.
+///
+/// NOT skipped: Sent, Drafts, Spam and Trash. Each holds mail that is genuinely
+/// its own, and Spam and Trash do not appear under `\All` at all.
+///
+/// What this leaves out is mail ARCHIVED in Gmail -- taken out of the inbox
+/// without being labelled -- which exists only under `\All`. Collecting it
+/// without re-downloading everything means fetching Message-IDs from All Mail,
+/// which is cheap, and bodies only for those not already held.
+fn overlapping_view(item: &async_imap::types::Name) -> Option<&'static str> {
+    use async_imap::types::NameAttribute as Attribute;
+    item.attributes()
+        .iter()
+        .find_map(|attribute| match attribute {
+            Attribute::All => Some(r"\All"),
+            Attribute::Flagged => Some(r"\Flagged"),
+            // \Important is Gmail's own, so it arrives unrecognised. The
+            // leading backslash is trimmed because whether it survives parsing
+            // is the parser's business rather than ours.
+            Attribute::Extension(name)
+                if name
+                    .strip_prefix(r"\")
+                    .unwrap_or(name)
+                    .eq_ignore_ascii_case("Important") =>
+            {
+                Some(r"\Important")
+            }
+            _ => None,
+        })
+}
+
 pub type Session = async_imap::Session<tokio_rustls::client::TlsStream<TcpStream>>;
 
 /// Accepts any server certificate.
@@ -371,6 +420,15 @@ pub async fn run(config: &Config, pool: &PgPool, address: &str) -> Result<()> {
                 .iter()
                 .any(|a| matches!(a, async_imap::types::NameAttribute::NoSelect))
             {
+                continue;
+            }
+            // Gmail presents LABELS as folders, and several of them are views
+            // over mail that already lives somewhere else.
+            if let Some(attribute) = overlapping_view(&item) {
+                println!(
+                    "  skipping {} ({attribute}): a view, not a folder",
+                    item.name()
+                );
                 continue;
             }
             // The source tells us its hierarchy separator; we previously
