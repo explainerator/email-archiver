@@ -218,7 +218,27 @@ async fn connect(source: &Source) -> Result<Session> {
         .map_err(|_| anyhow::anyhow!("timed out in the TLS handshake with {}", source.host))?
         .context("TLS handshake failed")?;
 
-    let client = async_imap::Client::new(tls);
+    let mut client = async_imap::Client::new(tls);
+
+    // THE GREETING MUST BE READ BEFORE AUTHENTICATING. async-imap's own docs say
+    // so, and skipping it is survivable with LOGIN purely by accident:
+    // check_done_ok_from skips the unread greeting and finds the tagged reply.
+    //
+    // AUTHENTICATE is not so lucky. The greeting is not a continuation, so it
+    // takes the fall-through arm of the SASL loop, which hands off to
+    // check_done_ok_from -- and that function understands only tagged replies.
+    // It then swallows the server's `+` continuation while waiting for a tag,
+    // and the server waits for a credential that will never be sent. Both
+    // sides wait forever.
+    //
+    // That is what hung the Gmail import: nothing to do with the token, the
+    // scope, or the delegation, all of which were correct.
+    client
+        .read_response()
+        .await
+        .transpose()
+        .context("reading the server greeting")?
+        .context("server closed the connection before sending a greeting")?;
 
     // The authentication exchange gets its own, longer deadline: this is where
     // the Gmail stall happened -- inside SASL, not at connect time.

@@ -242,6 +242,7 @@ connection and wants the setting to persist.
 | Everything reads empty in the app | A code path is not declaring an identity | Not a data loss — check `email check <user>`, then the logs |
 | Ingest stops partway | Network blip | Re-run it; ingest is resumable |
 | Ingest hangs with no output after `ingesting …` | The IMAP conversation stalled | `email probe <address>` — prints what the server actually said |
+| A Google ingest reports a different address than the one registered | The mailbox's real address differs from the alias domain you registered | Cosmetic; re-register under the real address if you want the two to agree |
 | Folder shows fewer messages than the source | Usually byte-identical duplicates collapsing | `email diagnose <address> <folder>` |
 
 **An empty archive is not lost data.** Every policy-covered read returns nothing when the
