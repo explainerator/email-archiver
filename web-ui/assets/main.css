@@ -1,50 +1,100 @@
-/* Deliberately plain. Three panes, readable text, no framework. */
+/* Three panes, readable text, no framework.
+ *
+ * Structure is carried by SPACE AND TONE rather than by rules. An earlier
+ * version outlined nearly everything -- panes, every table row, cards, the
+ * parts list -- and a grid of 1px boxes is the thing that dates an interface
+ * fastest. Hairlines survive only where they separate the panes, which is
+ * genuine structure; everywhere else a surface is distinguished by sitting on
+ * a different background from the canvas behind it. */
 :root {
-  --bg: #ffffff; --fg: #1a1a1a; --muted: #6b6b6b;
-  --line: #e0e0e0; --accent: #1e5aa8; --error: #b3261e;
+  --canvas: #f5f6f8;      /* the page behind the panes */
+  --surface: #ffffff;     /* the panes themselves */
+  --fg: #12151a;
+  --muted: #697280;
+  --line: #e5e7ec;
+  --accent: #5b5bd6;
+  --error: #b3261e;
+  /* Selection and hover as tints of the two colours already in play, so they
+     stay correct in both schemes without a second set of variables. */
+  --tint-hover: color-mix(in srgb, var(--fg) 5%, transparent);
+  --tint-sel: color-mix(in srgb, var(--accent) 13%, transparent);
+  --shadow: 0 1px 2px rgb(0 0 0 / .07), 0 1px 8px rgb(0 0 0 / .04);
+  /* One radius scale. Uniform 4px everywhere was the other half of the dated
+     look; these are the sizes contemporary interfaces actually use. */
+  --r-sm: 6px;
+  --r: 10px;
+  --r-lg: 14px;
+  /* Long enough to read as motion, short enough never to be in the way. */
+  --dur: 120ms;
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #16181c; --fg: #e6e6e6; --muted: #9aa0a6;
-    --line: #2c2f36; --accent: #7aa7e6; --error: #f2b8b5;
+    --canvas: #0e1014;
+    --surface: #161920;
+    --fg: #e7e9ee;
+    --muted: #98a1b0;
+    --line: #252a33;
+    --accent: #8b8cf8;
+    --error: #f2b8b5;
+    --shadow: 0 1px 2px rgb(0 0 0 / .4), 0 1px 10px rgb(0 0 0 / .25);
   }
 }
 * { box-sizing: border-box; }
 body {
-  margin: 0; background: var(--bg); color: var(--fg);
+  margin: 0; background: var(--canvas); color: var(--fg);
   font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
 }
 .centre { display: grid; place-items: center; min-height: 100vh; padding: 1rem; }
 .muted { color: var(--muted); }
 .pad { padding: 1rem; }
 .error { color: var(--error); }
 
+/* An empty pane is a chance to look deliberate rather than unfinished. */
+.empty {
+  display: grid; place-items: center; height: 100%;
+  padding: 2rem; color: var(--muted); text-align: center;
+}
+
+/* Login */
 .card {
   display: flex; flex-direction: column; gap: .5rem;
-  width: min(22rem, 100%); padding: 1.5rem;
-  border: 1px solid var(--line); border-radius: 8px;
+  width: min(23rem, 100%); padding: 1.75rem;
+  background: var(--surface); border-radius: var(--r-lg); box-shadow: var(--shadow);
 }
-.card h1 { margin: 0 0 .5rem; font-size: 1.15rem; }
+.card h1 { margin: 0 0 .75rem; font-size: 1.3rem; letter-spacing: -.01em; }
 .card label { font-size: .8rem; color: var(--muted); }
 .card input {
-  padding: .5rem; border: 1px solid var(--line); border-radius: 4px;
-  background: var(--bg); color: var(--fg); font: inherit;
+  padding: .55rem .65rem; border: 1px solid var(--line); border-radius: var(--r-sm);
+  background: var(--surface); color: var(--fg); font: inherit;
+  transition: border-color var(--dur) ease, box-shadow var(--dur) ease;
+}
+.card input:focus {
+  outline: 0; border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
 }
 .card button {
-  margin-top: .75rem; padding: .55rem; border: 0; border-radius: 4px;
-  background: var(--accent); color: #fff; font: inherit; cursor: pointer;
+  margin-top: .85rem; padding: .6rem; border: 0; border-radius: var(--r-sm);
+  background: var(--accent); color: #fff; font: inherit; font-weight: 500;
+  cursor: pointer; transition: filter var(--dur) ease;
 }
+.card button:hover:not(:disabled) { filter: brightness(1.08); }
 .card button:disabled { opacity: .6; cursor: default; }
 
 .shell { display: flex; flex-direction: column; height: 100vh; }
 .shell header {
   display: flex; align-items: center; gap: 1rem;
-  padding: .6rem 1rem; border-bottom: 1px solid var(--line);
+  padding: .55rem 1rem; background: var(--surface);
+  border-bottom: 1px solid var(--line);
 }
+.shell header > strong { letter-spacing: -.01em; }
 .shell header .link {
-  margin-left: auto; border: 0; background: none;
-  color: var(--accent); font: inherit; cursor: pointer;
+  border: 0; background: none; color: var(--accent);
+  font: inherit; border-radius: var(--r-sm); padding: .2rem .4rem;
+  cursor: pointer; transition: background var(--dur) ease;
 }
+.shell header > .link { margin-left: auto; }
+.shell header .link:hover { background: var(--tint-hover); }
 
 /* Folders and reader are fixed; the message LIST takes the slack, so widening
    the window buys more subject text rather than a wider reading pane. The
@@ -62,56 +112,129 @@ body {
 }
 .panes > * { overflow-y: auto; min-width: 0; }
 .folders { border-right: 1px solid var(--line); padding: .5rem; }
-.list { border-right: 1px solid var(--line); }
+.list { border-right: 1px solid var(--line); background: var(--surface); }
+.reader { background: var(--surface); }
 
 /* A div, not a button: it contains the twisty button, and nested buttons are
    invalid HTML that browsers recover from unpredictably. Indentation is set
    inline per node, since the depth is only known at render time. */
 .folder {
   display: flex; width: 100%; gap: .35rem; align-items: center;
-  padding: .3rem .5rem; border-radius: 4px;
+  padding: .32rem .5rem; border-radius: var(--r-sm);
   background: none; color: inherit; font: inherit;
   text-align: left; cursor: pointer; user-select: none;
+  transition: background var(--dur) ease;
 }
-.folder:hover { background: color-mix(in srgb, var(--fg) 7%, transparent); }
-.folder.chosen { background: color-mix(in srgb, var(--accent) 18%, transparent); }
+.folder:hover { background: var(--tint-hover); }
+.folder.chosen { background: var(--tint-sel); font-weight: 500; }
 .folder .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.folder .badge { margin-left: auto; font-size: .75rem; color: var(--muted); }
+.folder .badge {
+  margin-left: auto; font-size: .7rem; color: var(--muted);
+  background: var(--tint-hover); border-radius: 999px; padding: 0 .4rem;
+}
 
 .list-head {
-  display: flex; justify-content: space-between; gap: 1rem;
-  padding: .6rem 1rem; border-bottom: 1px solid var(--line);
-  position: sticky; top: 0; background: var(--bg);
+  display: flex; align-items: center; gap: .75rem;
+  padding: .55rem .75rem .55rem 1rem; border-bottom: 1px solid var(--line);
+  position: sticky; top: 0; background: var(--surface); z-index: 1;
 }
-/* table-layout: fixed so the sized columns hold and only the subject flexes;
+.list-head strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Pushes itself, and the toggle after it, to the right edge. */
+.list-head .muted { margin-left: auto; flex: none; font-size: .8rem; }
+
+/* Table view -------------------------------------------------------------
+   table-layout: fixed so the sized columns hold and only the subject flexes;
    without it the browser re-measures from content and the columns jump as you
    page through. */
-.list table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+.list table { width: 100%; border-collapse: separate; border-spacing: 0; table-layout: fixed; }
 .list td {
-  padding: .4rem .6rem; border-bottom: 1px solid var(--line);
+  padding: .4rem .6rem;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  transition: background var(--dur) ease;
 }
 /* Paperclip, sender and date are fixed; the subject column has no width and so
    absorbs everything left over. */
 .list .clip { width: 1.6rem; padding-right: 0; text-align: center; opacity: .7; }
 .list .from { width: 15rem; color: var(--muted); }
-.list .date { width: 6.5rem; color: var(--muted); text-align: right; }
+.list .date { width: 6.5rem; color: var(--muted); text-align: right; padding-right: 1rem; }
 .list .subject { color: var(--fg); }
+.list tr { cursor: pointer; }
+.list tr:hover td { background: var(--tint-hover); }
+/* Selection is a rounded band rather than a full-bleed stripe: the radius on
+   the outer cells is what makes it read as an object rather than as paint
+   spilled across the pane. */
+.list tr.open td { background: var(--tint-sel); }
+.list tr td:first-child { border-radius: var(--r) 0 0 var(--r); }
+.list tr td:last-child { border-radius: 0 var(--r) var(--r) 0; }
+/* Unread: weight plus an accent edge, which survives being scanned quickly in
+   a way that bold text alone does not. */
 .list tr.unseen td { font-weight: 600; color: var(--fg); }
-.more {
-  display: block; width: calc(100% - 2rem); margin: 1rem;
-  padding: .5rem; border: 1px solid var(--line); border-radius: 4px;
-  background: none; color: inherit; font: inherit; cursor: pointer;
+.list tr.unseen td:first-child { box-shadow: inset 2px 0 var(--accent); }
+
+/* Card view --------------------------------------------------------------
+   Two lines: who wrote, then what they wrote. Reads faster than a table when
+   you are looking for a person rather than comparing a column. */
+.cards { padding: .35rem; }
+.crow {
+  position: relative; display: flex; gap: .7rem; align-items: flex-start;
+  padding: .55rem .7rem .55rem 1.15rem; border-radius: var(--r);
+  cursor: pointer; transition: background var(--dur) ease;
 }
+.crow:hover { background: var(--tint-hover); }
+.crow.open { background: var(--tint-sel); }
+/* The unread dot lives in the padding gutter, so alignment does not shift
+   depending on whether it is present. */
+.crow.unseen::before {
+  content: ""; position: absolute; left: .4rem; top: 1.25rem;
+  width: 6px; height: 6px; border-radius: 50%; background: var(--accent);
+}
+.avatar {
+  flex: 0 0 2rem; width: 2rem; height: 2rem; border-radius: 50%;
+  display: grid; place-items: center;
+  /* Hue comes from the sender, so one correspondent keeps one colour;
+     saturation and lightness are fixed so no hue can turn illegible. */
+  background: hsl(var(--h) 48% 46%); color: #fff;
+  font-size: .78rem; font-weight: 600; user-select: none;
+}
+@media (prefers-color-scheme: dark) { .avatar { background: hsl(var(--h) 42% 52%); } }
+.cmain { flex: 1; min-width: 0; }
+.cline1 { display: flex; gap: .5rem; align-items: baseline; }
+.cwho { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cwhen { margin-left: auto; flex: none; font-size: .75rem; color: var(--muted); }
+.cline2 { display: flex; gap: .4rem; align-items: center; min-width: 0; color: var(--muted); }
+.csubj { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cclip { flex: none; opacity: .7; font-size: .8rem; }
+.crow.unseen .cwho { font-weight: 600; }
+.crow.unseen .csubj { color: var(--fg); font-weight: 500; }
+
+/* The view switch. A segmented control, because the two options are one
+   decision rather than two independent buttons. */
+.viewtoggle {
+  display: inline-flex; gap: 2px; flex: none; padding: 2px;
+  background: var(--tint-hover); border-radius: var(--r-sm);
+}
+.viewtoggle button {
+  display: grid; place-items: center; width: 1.8rem; height: 1.55rem;
+  border: 0; border-radius: calc(var(--r-sm) - 2px);
+  background: none; color: var(--muted); cursor: pointer;
+  transition: background var(--dur) ease, color var(--dur) ease;
+}
+.viewtoggle button:hover { color: var(--fg); }
+.viewtoggle button.on { background: var(--surface); color: var(--fg); box-shadow: var(--shadow); }
+.viewtoggle svg { width: 15px; height: 15px; display: block; }
+
+.more {
+  display: block; width: calc(100% - 1.5rem); margin: .75rem;
+  padding: .55rem; border: 1px solid var(--line); border-radius: var(--r-sm);
+  background: none; color: inherit; font: inherit; cursor: pointer;
+  transition: background var(--dur) ease;
+}
+.more:hover:not(:disabled) { background: var(--tint-hover); }
 
 /* Reading pane */
-.list tr { cursor: pointer; }
-.list tr:hover td { background: color-mix(in srgb, var(--fg) 5%, transparent); }
-.list tr.open td { background: color-mix(in srgb, var(--accent) 16%, transparent); }
-
-.message { padding: 1rem 1.25rem; }
-.message header { border-bottom: 1px solid var(--line); padding-bottom: .75rem; }
-.message h2 { margin: 0 0 .5rem; font-size: 1.1rem; line-height: 1.35; }
+.message { padding: 1.25rem 1.5rem; }
+.message header { border-bottom: 1px solid var(--line); padding-bottom: .9rem; }
+.message h2 { margin: 0 0 .6rem; font-size: 1.35rem; line-height: 1.3; letter-spacing: -.015em; }
 .message dl {
   display: grid; grid-template-columns: 3.5rem 1fr;
   gap: .15rem .5rem; margin: 0; font-size: .85rem;
@@ -119,9 +242,10 @@ body {
 .message dt { color: var(--muted); }
 .message dd { margin: 0; overflow-wrap: anywhere; }
 
+/* A tinted panel rather than an outlined one -- same grouping, one less line. */
 .parts {
-  margin: .75rem 0 0; padding: .5rem .75rem; list-style: none;
-  border: 1px solid var(--line); border-radius: 4px; font-size: .85rem;
+  margin: .9rem 0 0; padding: .6rem .8rem; list-style: none;
+  background: var(--tint-hover); border-radius: var(--r); font-size: .85rem;
 }
 .parts li { padding: .15rem 0; overflow-wrap: anywhere; }
 
@@ -135,35 +259,42 @@ body {
 /* HTML body view */
 .viewswitch { display: flex; gap: .25rem; margin: 1rem 0 .5rem; }
 .viewswitch button {
-  padding: .2rem .6rem; border: 1px solid var(--line); border-radius: 4px;
-  background: none; color: var(--muted); font: inherit; font-size: .8rem;
-  cursor: pointer;
+  padding: .25rem .7rem; border: 0; border-radius: var(--r-sm);
+  background: var(--tint-hover); color: var(--muted); font: inherit; font-size: .8rem;
+  cursor: pointer; transition: background var(--dur) ease, color var(--dur) ease;
 }
-.viewswitch button.on { color: var(--fg); border-color: var(--accent); }
+.viewswitch button:hover { color: var(--fg); }
+.viewswitch button.on { background: var(--tint-sel); color: var(--fg); }
 .blocked {
   display: flex; gap: .75rem; align-items: center; flex-wrap: wrap;
-  padding: .5rem .75rem; margin-bottom: .5rem; font-size: .85rem;
-  border: 1px solid var(--line); border-radius: 4px;
+  padding: .55rem .8rem; margin-bottom: .5rem; font-size: .85rem;
+  background: var(--tint-hover); border-radius: var(--r);
 }
 .blocked button {
-  padding: .2rem .6rem; border: 1px solid var(--accent); border-radius: 4px;
+  padding: .25rem .7rem; border: 1px solid var(--accent); border-radius: var(--r-sm);
   background: none; color: var(--accent); font: inherit; cursor: pointer;
+  transition: background var(--dur) ease;
 }
+.blocked button:hover { background: var(--tint-sel); }
 /* The frame is a separate document; it cannot inherit our styles, and must not
    be given a transparent background that lets page content show through. */
 .htmlframe {
-  width: 100%; min-height: 60vh; border: 0;
-  background: var(--bg); color-scheme: light dark;
+  width: 100%; min-height: 60vh; border: 0; border-radius: var(--r);
+  background: #fff; color-scheme: light dark;
 }
 
 /* Search */
 .shell header .search { display: flex; align-items: center; gap: .5rem; flex: 1; max-width: 26rem; }
 .shell header .search input {
-  flex: 1; padding: .3rem .55rem; font: inherit; font-size: .9rem;
-  border: 1px solid var(--line); border-radius: 4px;
-  background: var(--bg); color: var(--fg);
+  flex: 1; padding: .35rem .7rem; font: inherit; font-size: .9rem;
+  border: 1px solid var(--line); border-radius: 999px;
+  background: var(--canvas); color: var(--fg);
+  transition: border-color var(--dur) ease, box-shadow var(--dur) ease;
 }
-.shell header .search .link { margin-left: 0; }
+.shell header .search input:focus {
+  outline: 0; border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent);
+}
 /* The folder a hit came from, trailing the subject rather than taking a column
    of its own -- it is context, not a field worth aligning. */
 .list .infolder { color: var(--muted); font-size: .8rem; }
@@ -173,6 +304,7 @@ body {
   flex: 0 0 1rem; width: 1rem; padding: 0; border: 0;
   background: none; color: var(--muted); font: inherit; font-size: .7rem;
   line-height: 1; cursor: pointer; text-align: center;
+  transition: color var(--dur) ease;
 }
 .twisty:hover { color: var(--fg); }
 /* Leaves keep the same indent as their siblings with children, so labels at one

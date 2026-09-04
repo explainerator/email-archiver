@@ -124,6 +124,10 @@ fn Shell(identity: Identity, auth: Signal<Auth>) -> Element {
     let folders = use_resource(api::folders);
     let mut selected = use_signal(|| None::<Folder>);
     let mut open = use_signal(|| None::<String>);
+    // Held here rather than in the lists: switching folders or running a
+    // search remounts those, and a layout preference that reset itself
+    // every time you clicked a folder would be worse than no preference.
+    let view = use_signal(RowView::load);
 
     // The term that has been SUBMITTED, kept apart from what is being typed:
     // searching per keystroke would fire a ~570 ms query per character.
@@ -207,22 +211,24 @@ fn Shell(identity: Identity, auth: Signal<Auth>) -> Element {
                                 query: q,
                                 opened: open(),
                                 onopen: move |hash| open.set(Some(hash)),
+                                view,
                             }
                         },
-                        (_, None) => rsx! { p { class: "muted pad", "Select a folder." } },
+                        (_, None) => rsx! { div { class: "empty", "Select a folder to begin." } },
                         (_, Some(folder)) => rsx! {
                             MessageList {
                                 key: "{folder.id}",
                                 folder,
                                 opened: open(),
                                 onopen: move |hash| open.set(Some(hash)),
+                                view,
                             }
                         },
                     }
                 }
                 section { class: "reader",
                     match open() {
-                        None => rsx! { p { class: "muted pad", "Select a message." } },
+                        None => rsx! { div { class: "empty", "Select a message to read it." } },
                         Some(hash) => rsx! { Reader { key: "{hash}", blake3: hash } },
                     }
                 }
@@ -435,7 +441,12 @@ fn FolderNode(
 }
 
 #[component]
-fn MessageList(folder: Folder, opened: Option<String>, onopen: EventHandler<String>) -> Element {
+fn MessageList(
+    folder: Folder,
+    opened: Option<String>,
+    onopen: EventHandler<String>,
+    view: Signal<RowView>,
+) -> Element {
     let mut messages = use_signal(Vec::<MessageSummary>::new);
     let mut next = use_signal(|| None::<String>);
     let mut error = use_signal(|| None::<String>);
@@ -478,61 +489,75 @@ fn MessageList(folder: Folder, opened: Option<String>, onopen: EventHandler<Stri
         div { class: "list-head",
             strong { "{folder.path}" }
             span { class: "muted", "{folder.total} messages" }
+            ViewToggle { view }
         }
         if let Some(message) = error() {
             p { class: "error pad", "{message}" }
         }
-        table {
-            tbody {
-                for message in messages() {
-                    tr {
-                        key: "{message.uid}",
-                        class: match (opened.as_deref() == Some(message.blake3.as_str()), message.seen) {
-                            (true, _) => "open",
-                            (false, false) => "unseen",
-                            (false, true) => "",
-                        },
-                        onclick: {
-                            let hash = message.blake3.clone();
-                            let uid = message.uid;
-                            let was_seen = message.seen;
-                            move |_| {
-                                onopen.call(hash.clone());
-                                // Opening a message marks it read. Optimistic:
-                                // the row updates immediately and the request
-                                // follows, because waiting on a round trip to
-                                // grey out a row you just clicked feels broken.
-                                // A failure leaves read state stale, which is
-                                // the mildest thing that can go wrong here.
-                                if !was_seen {
-                                    if let Some(row) =
-                                        messages.write().iter_mut().find(|m| m.uid == uid)
-                                    {
-                                        row.seen = true;
-                                    }
-                                    spawn(async move {
-                                        let _ = api::set_seen(id, uid, true).await;
-                                    });
+        // Two presentations of the same rows, chosen by the reader. Both go
+        // through open_message, so only the layout differs -- the behaviour
+        // cannot drift apart between them.
+        if view() == RowView::Table {
+            table {
+                tbody {
+                    for message in messages() {
+                        tr {
+                            key: "{message.uid}",
+                            class: state_class("", opened.as_deref() == Some(message.blake3.as_str()), message.seen),
+                            onclick: {
+                                let row = message.clone();
+                                move |_| open_message(messages, onopen, id, &row)
+                            },
+                            td { class: "clip",
+                                // Titled so the column is not a mystery glyph to
+                                // anyone using a screen reader.
+                                if message.has_attachments {
+                                    span { title: "Has attachments", "\u{1F4CE}" }
                                 }
                             }
+                            td { class: "from", title: "{message.from.clone().unwrap_or_default()}",
+                                // The display name is what people recognise; the
+                                // address stays in the tooltip, because a name is
+                                // sender-supplied and freely forgeable.
+                                "{sender(&message)}"
+                            }
+                            td { class: "subject",
+                                "{message.subject.clone().unwrap_or_else(|| String::from(\"(no subject)\"))}"
+                            }
+                            td { class: "date", "{smart_date(&message.date)}" }
+                        }
+                    }
+                }
+            }
+        } else {
+            div { class: "cards",
+                for message in messages() {
+                    div {
+                        key: "{message.uid}",
+                        class: state_class("crow", opened.as_deref() == Some(message.blake3.as_str()), message.seen),
+                        onclick: {
+                            let row = message.clone();
+                            move |_| open_message(messages, onopen, id, &row)
                         },
-                        td { class: "clip",
-                            // Titled so the column is not a mystery glyph to
-                            // anyone using a screen reader.
-                            if message.has_attachments {
-                                span { title: "Has attachments", "\u{1F4CE}" }
+                        Avatar { seed: avatar_seed(&message), label: sender(&message) }
+                        div { class: "cmain",
+                            div { class: "cline1",
+                                span {
+                                    class: "cwho",
+                                    title: "{message.from.clone().unwrap_or_default()}",
+                                    "{sender(&message)}"
+                                }
+                                span { class: "cwhen", "{smart_date(&message.date)}" }
+                            }
+                            div { class: "cline2",
+                                span { class: "csubj",
+                                    "{message.subject.clone().unwrap_or_else(|| String::from(\"(no subject)\"))}"
+                                }
+                                if message.has_attachments {
+                                    span { class: "cclip", title: "Has attachments", "\u{1F4CE}" }
+                                }
                             }
                         }
-                        td { class: "from", title: "{message.from.clone().unwrap_or_default()}",
-                            // The display name is what people recognise; the
-                            // address stays in the tooltip, because a name is
-                            // sender-supplied and freely forgeable.
-                            "{sender(&message)}"
-                        }
-                        td { class: "subject",
-                            "{message.subject.clone().unwrap_or_else(|| String::from(\"(no subject)\"))}"
-                        }
-                        td { class: "date", "{short_date(&message.date)}" }
                     }
                 }
             }
@@ -547,13 +572,278 @@ fn MessageList(folder: Folder, opened: Option<String>, onopen: EventHandler<Stri
     }
 }
 
-/// `2026-09-02T18:50:03+00:00` -> `2026-09-02`.
+/// Which presentation the message list uses.
 ///
-/// Deliberately not a date library. The server sends RFC 3339, the date part is
-/// fixed-width and leading, and pulling `chrono` into the wasm bundle to take a
-/// prefix would be a poor trade.
-fn short_date(rfc3339: &str) -> &str {
-    rfc3339.split('T').next().unwrap_or(rfc3339)
+/// A preference rather than a redesign. The table is denser and lines its
+/// columns up for comparison; the cards put the correspondent first and are
+/// quicker to scan for a person. People genuinely disagree about which they
+/// want, so both stay and the choice belongs to the reader.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RowView {
+    Table,
+    Cards,
+}
+
+const VIEW_KEY: &str = "archive.rowview";
+
+impl RowView {
+    /// Cards by default, because it is the friendlier of the two on first
+    /// sight. Anyone who prefers the table has to say so exactly once.
+    fn load() -> Self {
+        match storage().and_then(|s| s.get_item(VIEW_KEY).ok().flatten()) {
+            Some(choice) if choice == "table" => RowView::Table,
+            _ => RowView::Cards,
+        }
+    }
+
+    fn save(self) {
+        if let Some(store) = storage() {
+            let _ = store.set_item(
+                VIEW_KEY,
+                match self {
+                    RowView::Table => "table",
+                    RowView::Cards => "cards",
+                },
+            );
+        }
+    }
+}
+
+/// Local storage, if this host has any.
+///
+/// Fallible twice over -- no window outside a browser, and a browser that
+/// refuses storage outright in private mode -- and neither failure deserves to
+/// be surfaced. Forgetting a layout preference is not something to interrupt
+/// anyone about.
+fn storage() -> Option<web_sys::Storage> {
+    web_sys::window()?.local_storage().ok().flatten()
+}
+
+const MONTHS: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+/// Indexed with Sunday at 0, which is what the epoch offset in `smart_date`
+/// produces.
+const WEEKDAYS: [&str; 7] = [
+    "Sunday",
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+];
+
+/// A date a person can read at a glance.
+///
+/// Today gives the time, because for today's mail the hour is the useful part;
+/// the past week gives the weekday; older gives the date. A column of
+/// `2026-09-02` on every row is accurate and says almost nothing at a glance.
+///
+/// Still not a date library. `js_sys` is already in every wasm build, and the
+/// civil-date arithmetic below is a dozen lines, so `chrono` would be a large
+/// bundle bought for a small sum.
+///
+/// The message keeps the Y-M-D its own timestamp carries, which is the SENDER's
+/// offset, while "today" is the reader's. That is the convention the fixed date
+/// column already used, and the alternative -- restating each timestamp in the
+/// reader's zone -- would relabel the day a message was sent.
+fn smart_date(rfc3339: &str) -> String {
+    let Some((y, m, d)) = date_parts(rfc3339) else {
+        return rfc3339.to_string();
+    };
+    let now = js_sys::Date::new_0();
+    let now_year = now.get_full_year() as i64;
+    let then = days_from_civil(y, m, d);
+    let today = days_from_civil(now_year, now.get_month() as i64 + 1, now.get_date() as i64);
+    let month = MONTHS.get((m - 1) as usize).copied().unwrap_or("");
+
+    match today - then {
+        0 => time_part(rfc3339).unwrap_or_else(|| String::from("Today")),
+        1 => String::from("Yesterday"),
+        // Weekdays only look backwards. A date in the future is a clock wrong
+        // somewhere, and "Thursday" would hide that rather than show it.
+        2..=6 => String::from(WEEKDAYS[(then + 4).rem_euclid(7) as usize]),
+        _ if y == now_year => format!("{d} {month}"),
+        _ => format!("{d} {month} {y}"),
+    }
+}
+
+/// `2026-09-02T18:50:03+00:00` -> `(2026, 9, 2)`.
+fn date_parts(rfc3339: &str) -> Option<(i64, i64, i64)> {
+    let mut parts = rfc3339.split('T').next()?.split('-');
+    Some((
+        parts.next()?.parse().ok()?,
+        parts.next()?.parse().ok()?,
+        parts.next()?.parse().ok()?,
+    ))
+}
+
+/// `2026-09-02T18:50:03+00:00` -> `18:50`.
+fn time_part(rfc3339: &str) -> Option<String> {
+    let mut parts = rfc3339.split('T').nth(1)?.split(':');
+    let hour = parts.next()?;
+    let minute = parts.next()?;
+    (hour.len() == 2 && minute.len() == 2).then(|| format!("{hour}:{minute}"))
+}
+
+/// Days from 1970-01-01 to a civil date.
+///
+/// Howard Hinnant's algorithm: exact for any proleptic Gregorian date, no
+/// lookup tables, and short enough to read.
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146097 + doe - 719468
+}
+
+/// One letter for the avatar, falling back rather than showing a blank circle.
+fn monogram(label: &str) -> String {
+    label
+        .chars()
+        .find(|c| c.is_alphanumeric())
+        .map(|c| c.to_uppercase().to_string())
+        .unwrap_or_else(|| String::from("?"))
+}
+
+/// A stable hue per correspondent.
+///
+/// FNV-1a because the only requirement is that one sender always lands on one
+/// colour. This picks a swatch; it protects nothing, and should not be mistaken
+/// for something that does.
+fn hue(seed: &str) -> u32 {
+    let mut hash: u32 = 2166136261;
+    for byte in seed.bytes() {
+        hash ^= byte as u32;
+        hash = hash.wrapping_mul(16777619);
+    }
+    hash % 360
+}
+
+/// Seeded on the ADDRESS wherever there is one, so a sender who changes their
+/// display name keeps the colour you have learned to recognise them by.
+fn avatar_seed(message: &MessageSummary) -> String {
+    message
+        .from
+        .clone()
+        .or_else(|| message.from_name.clone())
+        .unwrap_or_default()
+}
+
+/// Row classes shared by both presentations, so "open" and "unread" cannot
+/// drift apart between them.
+fn state_class(base: &str, opened: bool, seen: bool) -> String {
+    let state = match (opened, seen) {
+        (true, _) => "open",
+        (false, false) => "unseen",
+        (false, true) => "",
+    };
+    match (base.is_empty(), state.is_empty()) {
+        (true, _) => state.to_string(),
+        (false, true) => base.to_string(),
+        (false, false) => format!("{base} {state}"),
+    }
+}
+
+/// Open a message, and mark it read on the way.
+///
+/// A free function rather than a closure inside the component, because both
+/// presentations call it. Two copies of "and also mark it seen" is exactly how
+/// the table and the cards would quietly stop agreeing with each other.
+fn open_message(
+    mut messages: Signal<Vec<MessageSummary>>,
+    onopen: EventHandler<String>,
+    folder_id: i64,
+    message: &MessageSummary,
+) {
+    onopen.call(message.blake3.clone());
+    if message.seen {
+        return;
+    }
+    // Optimistic: the row updates immediately and the request follows, because
+    // waiting on a round trip to grey out a row you just clicked feels broken.
+    // A failure leaves read state stale, which is the mildest thing that can go
+    // wrong here.
+    let uid = message.uid;
+    if let Some(row) = messages.write().iter_mut().find(|m| m.uid == uid) {
+        row.seen = true;
+    }
+    spawn(async move {
+        let _ = api::set_seen(folder_id, uid, true).await;
+    });
+}
+
+/// The switch between the two list presentations.
+///
+/// A segmented control rather than two buttons: it is one decision with two
+/// answers, and the pressed state has to say which answer is currently in
+/// force. Icons alone, because the choice is visual and a word for each would
+/// be wider than the thing it describes -- but each carries a title and
+/// `aria-pressed`, so it is neither a mystery glyph nor invisible to a screen
+/// reader.
+#[component]
+fn ViewToggle(mut view: Signal<RowView>) -> Element {
+    rsx! {
+        div { class: "viewtoggle", role: "group", aria_label: "Message list layout",
+            button {
+                r#type: "button",
+                class: if view() == RowView::Table { "on" } else { "" },
+                title: "Table",
+                aria_pressed: "{view() == RowView::Table}",
+                onclick: move |_| {
+                    view.set(RowView::Table);
+                    RowView::Table.save();
+                },
+                svg {
+                    view_box: "0 0 16 16",
+                    fill: "none",
+                    stroke: "currentColor",
+                    stroke_width: "1.6",
+                    stroke_linecap: "round",
+                    path { d: "M2.5 4h11M2.5 8h11M2.5 12h11" }
+                }
+            }
+            button {
+                r#type: "button",
+                class: if view() == RowView::Cards { "on" } else { "" },
+                title: "Cards",
+                aria_pressed: "{view() == RowView::Cards}",
+                onclick: move |_| {
+                    view.set(RowView::Cards);
+                    RowView::Cards.save();
+                },
+                svg {
+                    view_box: "0 0 16 16",
+                    fill: "none",
+                    stroke: "currentColor",
+                    stroke_width: "1.5",
+                    stroke_linecap: "round",
+                    circle { cx: "4", cy: "4.6", r: "2.1" }
+                    path { d: "M8.6 3.4h5M8.6 6h3.2" }
+                    circle { cx: "4", cy: "11.4", r: "2.1" }
+                    path { d: "M8.6 10.2h5M8.6 12.8h3.2" }
+                }
+            }
+        }
+    }
+}
+
+/// The sender's initial, on a colour that is theirs.
+#[component]
+fn Avatar(seed: String, label: String) -> Element {
+    rsx! {
+        span {
+            class: "avatar",
+            style: "--h: {hue(&seed)}",
+            // Decorative: the sender's name is the very next thing read out.
+            aria_hidden: "true",
+            "{monogram(&label)}"
+        }
+    }
 }
 
 #[component]
@@ -735,7 +1025,12 @@ fn sender(message: &MessageSummary) -> String {
 }
 
 #[component]
-fn SearchResults(query: String, opened: Option<String>, onopen: EventHandler<String>) -> Element {
+fn SearchResults(
+    query: String,
+    opened: Option<String>,
+    onopen: EventHandler<String>,
+    view: Signal<RowView>,
+) -> Element {
     let mut hits = use_signal(Vec::<SearchHit>::new);
     let mut next = use_signal(|| None::<String>);
     let mut error = use_signal(|| None::<String>);
@@ -796,44 +1091,74 @@ fn SearchResults(query: String, opened: Option<String>, onopen: EventHandler<Str
         div { class: "list-head",
             strong { "Search: {query}" }
             span { class: "muted", "{status}" }
+            ViewToggle { view }
         }
         if let Some(message) = error() {
             p { class: "error pad", "{message}" }
         }
-        table {
-            tbody {
+        if view() == RowView::Table {
+            table {
+                tbody {
+                    for hit in hits() {
+                        tr {
+                            key: "{hit.folder_id}-{hit.message.uid}",
+                            class: state_class("", opened.as_deref() == Some(hit.message.blake3.as_str()), hit.message.seen),
+                            onclick: {
+                                let hash = hit.message.blake3.clone();
+                                move |_| onopen.call(hash.clone())
+                            },
+                            td { class: "clip",
+                                if hit.message.has_attachments {
+                                    span { title: "Has attachments", "\u{1F4CE}" }
+                                }
+                            }
+                            td {
+                                class: "from",
+                                title: "{hit.message.from.clone().unwrap_or_default()}",
+                                "{sender(&hit.message)}"
+                            }
+                            td { class: "subject",
+                                "{hit.message.subject.clone().unwrap_or_else(|| String::from(\"(no subject)\"))}"
+                                // Which folder the hit came from. Search spans all of
+                                // them, and a receipt in `work` means something
+                                // different from the same receipt in `personal`.
+                                span { class: "infolder", " {hit.folder_path}" }
+                            }
+                            td { class: "date", "{smart_date(&hit.message.date)}" }
+                        }
+                    }
+                }
+            }
+        } else {
+            div { class: "cards",
                 for hit in hits() {
-                    tr {
+                    div {
                         key: "{hit.folder_id}-{hit.message.uid}",
-                        class: if opened.as_deref() == Some(hit.message.blake3.as_str()) {
-                            "open"
-                        } else if hit.message.seen {
-                            ""
-                        } else {
-                            "unseen"
-                        },
+                        class: state_class("crow", opened.as_deref() == Some(hit.message.blake3.as_str()), hit.message.seen),
                         onclick: {
                             let hash = hit.message.blake3.clone();
                             move |_| onopen.call(hash.clone())
                         },
-                        td { class: "clip",
-                            if hit.message.has_attachments {
-                                span { title: "Has attachments", "\u{1F4CE}" }
+                        Avatar { seed: avatar_seed(&hit.message), label: sender(&hit.message) }
+                        div { class: "cmain",
+                            div { class: "cline1",
+                                span {
+                                    class: "cwho",
+                                    title: "{hit.message.from.clone().unwrap_or_default()}",
+                                    "{sender(&hit.message)}"
+                                }
+                                span { class: "cwhen", "{smart_date(&hit.message.date)}" }
+                            }
+                            div { class: "cline2",
+                                span { class: "csubj",
+                                    "{hit.message.subject.clone().unwrap_or_else(|| String::from(\"(no subject)\"))}"
+                                }
+                                span { class: "infolder", "{hit.folder_path}" }
+                                if hit.message.has_attachments {
+                                    span { class: "cclip", title: "Has attachments", "\u{1F4CE}" }
+                                }
                             }
                         }
-                        td {
-                            class: "from",
-                            title: "{hit.message.from.clone().unwrap_or_default()}",
-                            "{sender(&hit.message)}"
-                        }
-                        td { class: "subject",
-                            "{hit.message.subject.clone().unwrap_or_else(|| String::from(\"(no subject)\"))}"
-                            // Which folder the hit came from. Search spans all of
-                            // them, and a receipt in `work` means something
-                            // different from the same receipt in `personal`.
-                            span { class: "infolder", " {hit.folder_path}" }
-                        }
-                        td { class: "date", "{short_date(&hit.message.date)}" }
                     }
                 }
             }
@@ -948,5 +1273,78 @@ mod tests {
         }
         walk(&tree, &mut seen);
         assert_eq!(seen.len(), 6);
+    }
+}
+
+/// The date and avatar helpers, which are pure and so can be checked here.
+///
+/// `smart_date` itself mostly cannot: it asks `js_sys` for today, and there is
+/// no JS runtime under `cargo test`. Everything it relies on to reach an answer
+/// is tested instead, which is where the arithmetic that could actually be
+/// wrong lives.
+#[cfg(test)]
+mod rows {
+    use super::*;
+
+    #[test]
+    fn civil_days_anchor_on_the_epoch() {
+        assert_eq!(days_from_civil(1970, 1, 1), 0);
+        assert_eq!(days_from_civil(1970, 1, 2), 1);
+        assert_eq!(days_from_civil(1969, 12, 31), -1);
+        // Thirty years, seven of them leap.
+        assert_eq!(days_from_civil(2000, 1, 1), 10957);
+    }
+
+    #[test]
+    fn weekday_offset_names_the_right_day() {
+        // The epoch was a Thursday and 2000-01-01 a Saturday. If the +4 in
+        // smart_date is ever "simplified" away, these are what catch it.
+        let epoch = days_from_civil(1970, 1, 1);
+        assert_eq!(WEEKDAYS[(epoch + 4).rem_euclid(7) as usize], "Thursday");
+        let millennium = days_from_civil(2000, 1, 1);
+        assert_eq!(
+            WEEKDAYS[(millennium + 4).rem_euclid(7) as usize],
+            "Saturday"
+        );
+    }
+
+    #[test]
+    fn parses_the_wire_timestamp() {
+        assert_eq!(date_parts("2026-09-02T18:50:03+00:00"), Some((2026, 9, 2)));
+        assert_eq!(
+            time_part("2026-09-02T18:50:03+00:00").as_deref(),
+            Some("18:50")
+        );
+        assert_eq!(date_parts("not a date"), None);
+        assert_eq!(time_part("2026-09-02"), None);
+    }
+
+    #[test]
+    fn monograms_fall_back_rather_than_blank() {
+        assert_eq!(monogram("Ken Duck"), "K");
+        assert_eq!(monogram("ken@twoducks.ca"), "K");
+        // Leading punctuation is skipped, not displayed.
+        assert_eq!(monogram("\"Ken\""), "K");
+        assert_eq!(monogram(""), "?");
+        assert_eq!(monogram("   "), "?");
+    }
+
+    #[test]
+    fn one_sender_keeps_one_hue() {
+        assert_eq!(hue("ken@twoducks.ca"), hue("ken@twoducks.ca"));
+        assert_ne!(hue("ken@twoducks.ca"), hue("art@jduck.ca"));
+        for seed in ["", "a", "ken@twoducks.ca", "\u{1F600}"] {
+            assert!(hue(seed) < 360, "hue out of range for {seed:?}");
+        }
+    }
+
+    #[test]
+    fn row_state_is_the_same_in_both_layouts() {
+        assert_eq!(state_class("", true, false), "open");
+        assert_eq!(state_class("", false, false), "unseen");
+        assert_eq!(state_class("", false, true), "");
+        assert_eq!(state_class("crow", true, true), "crow open");
+        assert_eq!(state_class("crow", false, false), "crow unseen");
+        assert_eq!(state_class("crow", false, true), "crow");
     }
 }
