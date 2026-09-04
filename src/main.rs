@@ -5,7 +5,7 @@
 
 use anyhow::{Context, Result};
 use email_archiver::config::Config;
-use email_archiver::{check, db, diagnose, gmail, ingest, probe, secrets, server, web};
+use email_archiver::{check, db, diagnose, gmail, ingest, probe, repair, secrets, server, web};
 use email_archiver::{connect_db, EXPECTED_DATABASE};
 
 const USAGE: &str = "\
@@ -124,6 +124,16 @@ USAGE:
     email-archiver ingest <address>
         Pull mail from one source mailbox. Resumable: re-running continues
         from where it stopped.
+
+    email-archiver repair <address> [--fix]
+        List messages archived as empty, and with --fix re-fetch them.
+
+        A fetch that returns no body is stored as an empty message rather than
+        failing the run: failing would leave the resume point unmoved, and one
+        undeliverable message would block every message behind it. Empty bodies
+        all hash to one constant, so the archive carries an exact list of its
+        own gaps and this fills them in. Usually they were transient and the
+        second fetch works.
 
     email-archiver refresh
         Pull new mail for every followed account in turn, every folder. One
@@ -546,6 +556,13 @@ async fn main() -> Result<()> {
             // is waiting for a complete answer, not the cheap one the scheduler
             // runs between its full passes.
             ingest::refresh(&config, &pool, ingest::Sweep::Everything).await
+        }
+
+        Some("repair") => {
+            let address = arg(&args, 1, "address")?;
+            let fix = args.iter().any(|a| a == "--fix");
+            let pool = connect_db(&config).await?;
+            repair::run(&config, &pool, &address, fix).await
         }
 
         Some("ingest") => {

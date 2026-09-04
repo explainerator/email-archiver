@@ -627,6 +627,99 @@ pub async fn account_by_address(scope: &mut Scope<'_>, address: &str) -> Result<
 /// messages. Continuing from `last_source_uid` would silently skip mail, so the
 /// folder is rescanned from zero. Our own `uidnext` is untouched — the UIDs we
 /// serve to clients must never be reissued.
+/// blake3 of zero bytes.
+///
+/// Every failed fetch lands here, because the empty body it stored hashes to
+/// this one value. No real message can: a message has bytes. So this is an
+/// exact marker for "we stored nothing for this", needing no extra column and
+/// no guessing from size or an empty envelope, both of which a real message
+/// could in principle produce.
+pub const EMPTY_BLAKE3: &str = "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262";
+
+/// One placement holding nothing, and where to fetch it from again.
+pub struct EmptyPlacement {
+    pub folder_id: i64,
+    pub folder_name: String,
+    pub uid: i64,
+    pub source_uid: Option<i64>,
+}
+
+/// Every placement in this account that stored an empty body.
+pub async fn empty_placements(
+    scope: &mut Scope<'_>,
+    account_id: i64,
+) -> Result<Vec<EmptyPlacement>> {
+    let rows: Vec<(i64, String, i64, Option<i64>)> = sqlx::query_as(
+        "SELECT f.id, f.name, p.uid, p.source_uid
+           FROM placements p
+           JOIN messages m ON m.id = p.message_id
+           JOIN folders  f ON f.id = p.folder_id
+          WHERE f.account_id = $1 AND m.blake3 = $2
+          ORDER BY f.name, p.source_uid",
+    )
+    .bind(account_id)
+    .bind(EMPTY_BLAKE3)
+    .fetch_all(scope.conn())
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(folder_id, folder_name, uid, source_uid)| EmptyPlacement {
+            folder_id,
+            folder_name,
+            uid,
+            source_uid,
+        })
+        .collect())
+}
+
+/// Point an existing placement at a different message.
+///
+/// Repair cannot go through `place_message`: that matches on
+/// (folder_id, message_id), so a repaired body -- which hashes differently and
+/// is therefore a different message row -- would be given a NEW archive uid and
+/// a second placement, leaving the empty one exactly where it was. The whole
+/// point is to replace what this placement resolves to while the placement
+/// itself, and the uid clients have seen, stay put.
+pub async fn repoint_placement(
+    scope: &mut Scope<'_>,
+    folder_id: i64,
+    uid: i64,
+    message_id: i64,
+) -> Result<()> {
+    let updated =
+        sqlx::query("UPDATE placements SET message_id = $3 WHERE folder_id = $1 AND uid = $2")
+            .bind(folder_id)
+            .bind(uid)
+            .bind(message_id)
+            .execute(scope.conn())
+            .await?
+            .rows_affected();
+
+    anyhow::ensure!(updated == 1, "no placement {folder_id}/{uid} to repoint");
+    Ok(())
+}
+
+/// Delete the empty message row once nothing points at it any more.
+///
+/// Left until last and guarded by its own reference check: the row is shared by
+/// every empty placement in the archive, so removing it while another still
+/// refers to it would be caught by the foreign key -- correctly, but only after
+/// the repair had already reported success.
+pub async fn drop_empty_message_if_unused(scope: &mut Scope<'_>) -> Result<bool> {
+    let deleted = sqlx::query(
+        "DELETE FROM messages m
+          WHERE m.blake3 = $1
+            AND NOT EXISTS (SELECT 1 FROM placements p WHERE p.message_id = m.id)",
+    )
+    .bind(EMPTY_BLAKE3)
+    .execute(scope.conn())
+    .await?
+    .rows_affected();
+
+    Ok(deleted > 0)
+}
+
 /// The three folder kinds search can exclude.
 ///
 /// Only these three. Drafts and Archive are just as identifiable from the same

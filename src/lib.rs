@@ -25,6 +25,7 @@ pub mod listen;
 pub mod naming;
 pub mod probe;
 pub mod ratelimit;
+pub mod repair;
 pub mod sanitise;
 pub mod secrets;
 pub mod server;

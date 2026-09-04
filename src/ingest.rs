@@ -973,8 +973,12 @@ async fn ingest_folder(
         ));
 
         let fetched: Vec<(u32, Vec<u8>, bool)> = {
+            // RFC822.SIZE comes along so the body can be checked against
+            // what the server says it should be. It costs nothing -- the
+            // server has the number to hand -- and it is the only moment at
+            // which a short body can be recognised as short.
             let mut stream = session
-                .uid_fetch(&set, "(UID FLAGS BODY.PEEK[])")
+                .uid_fetch(&set, "(UID FLAGS RFC822.SIZE BODY.PEEK[])")
                 .await
                 .with_context(|| format!("fetching {name} uids"))?;
 
@@ -986,6 +990,33 @@ async fn ingest_folder(
                 let seen = item
                     .flags()
                     .any(|f| matches!(f, async_imap::types::Flag::Seen));
+
+                // A body that is not the length the server just declared is a
+                // failed fetch, not a short message. Four messages were
+                // archived as zero bytes this way: the fetch returned
+                // Some(&[]), which read as an empty message rather than as
+                // nothing arriving, and the server hands over all 59,248 bytes
+                // when asked again.
+                //
+                // Deliberately NOT an error. Failing here would leave the
+                // watermark unmoved, so one message the server could never
+                // deliver would block every message behind it forever. Instead
+                // the empty body is stored, which is what the previous
+                // behaviour did anyway -- but now on purpose, because empty
+                // hashes to a known constant and `email repair` can find every
+                // one of them exactly. Truncation is routed into that same
+                // detector rather than being given a marker of its own.
+                let declared = item.size.unwrap_or(0) as usize;
+                if declared != 0 && body.len() != declared {
+                    eprintln!(
+                        "  {name}/{uid}: fetch returned {} bytes, server says {declared}; \
+                         storing empty for `email repair`",
+                        body.len()
+                    );
+                    out.push((uid, Vec::new(), seen));
+                    continue;
+                }
+
                 out.push((uid, body.to_vec(), seen));
             }
             out

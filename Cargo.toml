@@ -73,3 +73,7 @@ tower = "0.5"
 [dev-dependencies]
 # Integration tests in tests/ drive async database calls directly.
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+# Diagnostics that walk an IMAP response stream, as ingest does.
+futures = "0.3.34"
+async-imap = { version = "0.11.3", default-features = false, features = ["runtime-tokio"] }
+tokio-rustls = "0.26.4"
