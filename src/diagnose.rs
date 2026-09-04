@@ -31,8 +31,14 @@ pub async fn run(config: &Config, pool: &PgPool, address: &str, folder: &str) ->
 
     // Everything after this reads the policy-covered tables.
     let mut scope = db::Scope::begin(pool, account.user_id).await?;
-    let key = config.key()?;
-    let source = db::source_for(pool, &key, address).await?;
+    // source_for handles only stored IMAP credentials, so this reported
+    // "no source credentials" for every Google Workspace account -- the one
+    // kind of account whose completeness you most want to interrogate, since
+    // Gmail's IMAP view of a mailbox is not its whole contents.
+    // source_for_address is what ingest itself resolves through, and it covers
+    // both, so diagnose can no longer disagree with ingest about what a source
+    // even is.
+    let source = ingest::source_for_address(config, pool, address).await?;
 
     println!("diagnosing {address} / {folder}");
 
