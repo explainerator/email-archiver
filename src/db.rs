@@ -211,6 +211,48 @@ pub async fn google_domains(pool: &PgPool) -> Result<Vec<(String, String)>> {
     Ok(rows)
 }
 
+/// Turn following on or off for one source mailbox.
+pub async fn set_follow(pool: &PgPool, address: &str, follow: bool) -> Result<()> {
+    let owner = owner_of_address(pool, address).await?;
+    let mut scope = Scope::begin(pool, owner).await?;
+
+    let updated = sqlx::query("UPDATE accounts SET follow = $2 WHERE address = $1")
+        .bind(address)
+        .bind(follow)
+        .execute(scope.conn())
+        .await?
+        .rows_affected();
+
+    // An UPDATE that matches nothing reports success, so this is checked rather
+    // than assumed -- the same silence that hid the hierarchy-delimiter bug.
+    anyhow::ensure!(updated == 1, "no account {address:?}");
+    scope.commit().await?;
+    Ok(())
+}
+
+/// The addresses `refresh` should sweep, oldest user first.
+///
+/// Walks the users because `accounts` is policy-covered and there is no
+/// identity that can see all of them at once -- which is the policy working,
+/// not an obstacle to route around.
+pub async fn followed_accounts(pool: &PgPool) -> Result<Vec<String>> {
+    let users: Vec<i64> = sqlx::query_scalar("SELECT id FROM users ORDER BY id")
+        .fetch_all(pool)
+        .await?;
+
+    let mut all = Vec::new();
+    for user_id in users {
+        let mut scope = Scope::begin(pool, user_id).await?;
+        let rows: Vec<String> =
+            sqlx::query_scalar("SELECT address FROM accounts WHERE follow ORDER BY address")
+                .fetch_all(scope.conn())
+                .await?;
+        drop(scope);
+        all.extend(rows);
+    }
+    Ok(all)
+}
+
 /// Turn certificate verification on or off for one source mailbox.
 ///
 /// Separate from `set_source` so a boolean can be changed without re-entering a
@@ -296,12 +338,12 @@ pub struct UserSummary {
 pub async fn accounts_for_user(
     pool: &PgPool,
     user_id: i64,
-) -> Result<Vec<(String, String, String, Option<String>, bool, bool)>> {
+) -> Result<Vec<(String, String, String, Option<String>, bool, bool, bool)>> {
     let mut scope = Scope::begin(pool, user_id).await?;
     let rows = sqlx::query_as(
         "SELECT address, label, provider, imap_host,
                 (imap_host IS NOT NULL AND imap_password_enc IS NOT NULL),
-                allow_invalid_certs
+                allow_invalid_certs, follow
            FROM accounts ORDER BY address",
     )
     .fetch_all(scope.conn())
@@ -317,7 +359,7 @@ pub async fn accounts_for_user(
 /// merely registered, not to hand back secrets.
 pub async fn all_sources(
     pool: &PgPool,
-) -> Result<Vec<(String, String, String, Option<String>, bool, bool)>> {
+) -> Result<Vec<(String, String, String, Option<String>, bool, bool, bool)>> {
     let users: Vec<i64> = sqlx::query_scalar("SELECT id FROM users ORDER BY id")
         .fetch_all(pool)
         .await?;
@@ -327,10 +369,10 @@ pub async fn all_sources(
     let mut all = Vec::new();
     for user_id in users {
         let mut scope = Scope::begin(pool, user_id).await?;
-        let rows: Vec<(String, String, String, Option<String>, bool, bool)> = sqlx::query_as(
+        let rows: Vec<(String, String, String, Option<String>, bool, bool, bool)> = sqlx::query_as(
             "SELECT address, label, provider, imap_host,
                     (imap_host IS NOT NULL AND imap_password_enc IS NOT NULL),
-                    allow_invalid_certs
+                    allow_invalid_certs, follow
                FROM accounts ORDER BY address",
         )
         .fetch_all(scope.conn())

@@ -506,6 +506,62 @@ pub async fn source_for_address(
     Ok(source)
 }
 
+/// Check every followed mailbox for new mail.
+///
+/// One account failing must not stop the rest. A sweep exists precisely because
+/// some of these mailboxes are on their way out -- a lapsed domain, a provider
+/// that has closed the account, a password changed without telling anyone --
+/// and the first of those to fail would otherwise take every account behind it
+/// down with it, silently, on a run nobody is watching.
+///
+/// So failures are collected and reported together, and the process still exits
+/// non-zero if any occurred: a scheduled sweep that swallowed its errors would
+/// be worse than no sweep, because it would look like the archive was current.
+pub async fn refresh(config: &Config, pool: &PgPool) -> Result<()> {
+    let addresses = db::followed_accounts(pool).await?;
+
+    if addresses.is_empty() {
+        println!(
+            "no accounts are being followed. `email sources` lists them; \
+             `email follow <address> on` starts one."
+        );
+        return Ok(());
+    }
+
+    println!("refreshing {} account(s)", addresses.len());
+
+    let mut failed: Vec<(String, String)> = Vec::new();
+    for address in &addresses {
+        println!();
+        if let Err(e) = run(config, pool, address).await {
+            // {e:#} for the whole chain: on an unattended run this line is the
+            // only account of what went wrong.
+            eprintln!("{address}: FAILED -- {e:#}");
+            failed.push((address.clone(), format!("{e:#}")));
+        }
+    }
+
+    println!();
+    println!(
+        "refreshed {} of {} account(s)",
+        addresses.len() - failed.len(),
+        addresses.len()
+    );
+
+    if !failed.is_empty() {
+        for (address, _) in &failed {
+            println!("  failed: {address}");
+        }
+        anyhow::bail!(
+            "{} of {} account(s) failed. An account that is gone for good should be \
+             unfollowed: email follow <address> off",
+            failed.len(),
+            addresses.len()
+        );
+    }
+    Ok(())
+}
+
 pub async fn run(config: &Config, pool: &PgPool, address: &str) -> Result<()> {
     // accounts is policy-covered, so the owner has to be resolved first --
     // through `users`, which is not. See db::owner_of_address.

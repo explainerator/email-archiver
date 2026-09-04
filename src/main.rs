@@ -125,6 +125,17 @@ USAGE:
         Pull mail from one source mailbox. Resumable: re-running continues
         from where it stopped.
 
+    email-archiver refresh
+        Pull new mail for every followed account in turn. This is the command
+        to run on a schedule. One account failing does not stop the others,
+        and the exit status reports whether any did.
+
+    email-archiver follow <address> <on|off>
+        Whether `refresh` keeps checking this mailbox. On by default when an
+        account is registered. Turn it off once a source is shut down: nothing
+        is deleted and the archive of it is untouched, only the reaching out
+        stops.
+
 Configuration is read from $EMAIL_ARCHIVER_CONFIG, else /etc/email-archiver/config.toml.
 Generate it with: cd terraform && terraform output -raw archiver_config > config.toml
 ";
@@ -304,7 +315,7 @@ async fn main() -> Result<()> {
             }
 
             println!("{login} -> bucket {bucket}");
-            for (address, label, provider, host, configured, insecure) in &accounts {
+            for (address, label, provider, host, configured, insecure, follow) in &accounts {
                 // The label is what prefixes this account's folders in the
                 // archive, so it is worth showing next to the address.
                 let how = match (provider.as_str(), configured) {
@@ -320,7 +331,10 @@ async fn main() -> Result<()> {
                 } else {
                     ""
                 };
-                println!("  {address:32} {label:12} {how}{tls}");
+                // Shown because an unfollowed account looks identical to a
+                // followed one until you notice it has stopped keeping up.
+                let following = if *follow { "" } else { "  [not followed]" };
+                println!("  {address:32} {label:12} {how}{tls}{following}");
             }
             Ok(())
         }
@@ -393,7 +407,7 @@ async fn main() -> Result<()> {
 
             if !accounts.is_empty() {
                 println!("Accounts:");
-                for (address, label, provider, host, configured, insecure) in &accounts {
+                for (address, label, provider, host, configured, insecure, follow) in &accounts {
                     let how = match (provider.as_str(), configured) {
                         ("gmail", _) => "google (domain key)".to_string(),
                         (_, true) => host.clone().unwrap_or_default(),
@@ -406,7 +420,8 @@ async fn main() -> Result<()> {
                     } else {
                         ""
                     };
-                    println!("  {address:32} {label:12} {how}{tls}");
+                    let following = if *follow { "" } else { "  [not followed]" };
+                    println!("  {address:32} {label:12} {how}{tls}{following}");
                 }
             }
             Ok(())
@@ -476,6 +491,33 @@ async fn main() -> Result<()> {
             let folder = arg(&args, 2, "folder")?;
             let pool = connect_db(&config).await?;
             diagnose::run(&config, &pool, &address, &folder).await
+        }
+
+        Some("follow") => {
+            let address = arg(&args, 1, "address")?;
+            let state = arg(&args, 2, "on|off")?;
+            let follow = match state.as_str() {
+                "on" | "yes" | "true" => true,
+                "off" | "no" | "false" => false,
+                other => anyhow::bail!("expected on or off, got {other:?}"),
+            };
+            let pool = connect_db(&config).await?;
+            db::set_follow(&pool, &address, follow).await?;
+
+            if follow {
+                println!("{address}: followed. `email refresh` will check it for new mail.");
+            } else {
+                println!("{address}: no longer followed.");
+                println!("  Nothing has been deleted. Every message, folder and credential");
+                println!("  stays exactly as it is; only the checking for new mail stops.");
+                println!("  Reversible at any time: email follow {address} on");
+            }
+            Ok(())
+        }
+
+        Some("refresh") => {
+            let pool = connect_db(&config).await?;
+            ingest::refresh(&config, &pool).await
         }
 
         Some("ingest") => {
